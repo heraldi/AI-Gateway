@@ -1,0 +1,308 @@
+import { db, getSetting, setSetting } from '../db/index.js';
+import type { Provider, ModelAlias } from '../db/index.js';
+import type { ProviderAdapter, ProviderConfig, ProviderType, NormalizedRequest, ModelInfo } from './types.js';
+import { AnthropicAdapter } from './adapters/anthropic.js';
+import { OpenAIAdapter, OpenAICompatibleAdapter } from './adapters/openai.js';
+import { ClaudeWebAdapter } from './adapters/claude-web.js';
+import { ChatGPTWebAdapter } from './adapters/chatgpt-web.js';
+import { BudWebAdapter } from './adapters/bud-web.js';
+import { DevinWebAdapter } from './adapters/devin-web.js';
+import { GeminiCliAdapter, AntigravityAdapter } from './adapters/cloudcode.js';
+import { CodexAdapter } from './adapters/codex.js';
+import { CursorAdapter, KiroAdapter } from './adapters/not-ported.js';
+
+const ADAPTERS: Record<ProviderType, ProviderAdapter> = {
+  'anthropic': AnthropicAdapter,
+  'anthropic-compatible': { ...AnthropicAdapter, type: 'anthropic-compatible' },
+  'openai': OpenAIAdapter,
+  'openai-compatible': OpenAICompatibleAdapter,
+  'ollama': { ...OpenAICompatibleAdapter, type: 'ollama' },
+  'claude-web': ClaudeWebAdapter,
+  'chatgpt-web': ChatGPTWebAdapter,
+  'bud-web': BudWebAdapter,
+  'devin-web': DevinWebAdapter,
+  'gemini-cli': GeminiCliAdapter,
+  'antigravity': AntigravityAdapter,
+  'codex': CodexAdapter,
+  'kiro': KiroAdapter,
+  'cursor': CursorAdapter,
+  'gitlab': { ...OpenAICompatibleAdapter, type: 'gitlab' },
+};
+
+// Default base URLs per type
+const DEFAULT_BASE_URLS: Partial<Record<ProviderType, string>> = {
+  'anthropic': 'https://api.anthropic.com',
+  'openai': 'https://api.openai.com',
+  'gemini-cli': 'https://cloudcode-pa.googleapis.com/v1internal',
+  'antigravity': 'https://daily-cloudcode-pa.googleapis.com',
+  'codex': 'https://chatgpt.com/backend-api/codex/responses',
+  'gitlab': 'https://gitlab.com/api/v4',
+  'ollama': 'http://localhost:11434',
+};
+
+function effectiveProviderType(p: Pick<Provider, 'type' | 'base_url'>): ProviderType {
+  const base = p.base_url?.toLowerCase() ?? '';
+  if (base.includes('app.devin.ai')) return 'devin-web';
+  if (base.includes('bud.app')) return 'bud-web';
+  if (base.includes('claude.ai')) return 'claude-web';
+  if (base.includes('chatgpt.com') || base.includes('chat.openai.com')) return 'chatgpt-web';
+  return p.type as ProviderType;
+}
+
+function pickRoundRobin<T extends { id: string }>(items: T[], key: string): T | undefined {
+  if (!items.length) return undefined;
+  if (items.length === 1) return items[0];
+  const settingKey = `rr:${key}`;
+  const current = Number.parseInt(getSetting(settingKey, '0'), 10);
+  const index = Number.isFinite(current) ? current % items.length : 0;
+  setSetting(settingKey, String(index + 1));
+  return items[index];
+}
+
+export function getAdapter(type: ProviderType): ProviderAdapter {
+  return ADAPTERS[type] ?? OpenAICompatibleAdapter;
+}
+
+export function dbProviderToConfig(p: Provider): ProviderConfig {
+  const type = effectiveProviderType(p);
+  return {
+    id: p.id,
+    name: p.name,
+    type,
+    baseUrl: p.base_url ?? DEFAULT_BASE_URLS[type],
+    apiKey: p.api_key ?? undefined,
+    cookies: p.cookies ? JSON.parse(p.cookies) : undefined,
+    extraHeaders: p.extra_headers ? JSON.parse(p.extra_headers) : undefined,
+  };
+}
+
+/** Find the best provider+adapter for a given model name */
+export function resolveProvider(model: string): {
+  adapter: ProviderAdapter;
+  config: ProviderConfig;
+  resolvedModel: string;
+} | null {
+  // 0. Exact client-visible model aliases.
+  const aliasMatches = db.prepare(`
+    SELECT ma.*, p.* FROM model_aliases ma
+    JOIN providers p ON p.id = ma.provider_id
+    WHERE ma.alias = ? AND p.enabled = 1
+    ORDER BY p.priority DESC, ma.created_at ASC
+  `).all(model) as (Provider & ModelAlias)[];
+
+  if (aliasMatches.length) {
+    const alias = pickRoundRobin(aliasMatches, `alias:${model}:${aliasMatches.map(a => a.id).join(',')}`) ?? aliasMatches[0];
+    const config = dbProviderToConfig(alias);
+    return { adapter: getAdapter(config.type), config, resolvedModel: alias.upstream_model };
+  }
+
+  // 1. Check explicit model routes first (by pattern matching)
+  const routes = db.prepare(
+    `SELECT mr.*, p.* FROM model_routes mr
+     JOIN providers p ON p.id = mr.provider_id
+     WHERE mr.enabled = 1 AND p.enabled = 1
+     ORDER BY length(mr.pattern) DESC`
+  ).all() as (Provider & { pattern: string; model_override: string | null })[];
+
+  const matchingRoutes: (Provider & { pattern: string; model_override: string | null })[] = [];
+  for (const route of routes) {
+    const pat = route.pattern;
+    const matches =
+      pat === model ||
+      pat === '*' ||
+      (pat.endsWith('*') && model.startsWith(pat.slice(0, -1))) ||
+      (pat.startsWith('*') && model.endsWith(pat.slice(1)));
+
+    if (matches) matchingRoutes.push(route);
+  }
+
+  if (matchingRoutes.length) {
+    const route = pickRoundRobin(matchingRoutes, `route:${model}:${matchingRoutes.map(r => r.id).join(',')}`) ?? matchingRoutes[0];
+    const config = dbProviderToConfig(route);
+    const adapter = getAdapter(config.type);
+    return { adapter, config, resolvedModel: route.model_override ?? model };
+  }
+
+  // 2. Auto-detect by model name prefix from enabled providers
+  const autoDetect = autoDetectProvider(model);
+  if (autoDetect) return autoDetect;
+
+  // 3. Fall back to highest-priority enabled provider
+  const fallbackProviders = db.prepare(
+    'SELECT * FROM providers WHERE enabled = 1 ORDER BY priority DESC, created_at ASC'
+  ).all() as Provider[];
+  const fallback = pickRoundRobin(fallbackProviders, 'fallback');
+
+  if (fallback) {
+    const config = dbProviderToConfig(fallback);
+    return {
+      adapter: getAdapter(config.type),
+      config,
+      resolvedModel: model,
+    };
+  }
+
+  return null;
+}
+
+function autoDetectProvider(model: string): ReturnType<typeof resolveProvider> {
+  const providers = db.prepare(
+    'SELECT * FROM providers WHERE enabled = 1 ORDER BY priority DESC'
+  ).all() as Provider[];
+
+  // Match by model prefix conventions
+  const isBudWeb = ['auto', 'claude-sonnet-4-6', 'claude-opus-4.6', 'gpt-5.5', 'gpt-5.4', 'gpt-5.3-codex'].includes(model);
+  const isAnthropic = model.startsWith('claude');
+  const isOpenAI = model.startsWith('gpt') || model.startsWith('o1') || model.startsWith('o3') || model.startsWith('o4');
+  const isXAI = model.startsWith('grok');
+  const isDevin = model.startsWith('devin-');
+  const isCodex = model.includes('codex');
+  const isGemini = model.startsWith('gemini');
+  const isKiro = model.startsWith('kiro');
+  const isCursor = model.startsWith('cursor');
+
+  if (isCursor) {
+    const p = pickRoundRobin(providers.filter(p => p.type === 'cursor'), 'auto:cursor');
+    if (p) return { adapter: getAdapter('cursor'), config: dbProviderToConfig(p), resolvedModel: model };
+  }
+
+  if (isKiro) {
+    const p = pickRoundRobin(providers.filter(p => p.type === 'kiro'), 'auto:kiro');
+    if (p) return { adapter: getAdapter('kiro'), config: dbProviderToConfig(p), resolvedModel: model };
+  }
+
+  if (isCodex) {
+    const p = pickRoundRobin(providers.filter(p => p.type === 'codex'), 'auto:codex');
+    if (p) return { adapter: getAdapter('codex'), config: dbProviderToConfig(p), resolvedModel: model };
+  }
+
+  if (isGemini) {
+    const p = pickRoundRobin(providers.filter(p => p.type === 'antigravity' || p.type === 'gemini-cli'), 'auto:gemini');
+    if (p) return { adapter: getAdapter(p.type as ProviderType), config: dbProviderToConfig(p), resolvedModel: model };
+  }
+
+  if (isDevin) {
+    const p = pickRoundRobin(providers.filter(p => effectiveProviderType(p) === 'devin-web'), 'auto:devin');
+    if (p) {
+      const config = dbProviderToConfig(p);
+      return {
+        adapter: getAdapter(config.type),
+        config,
+        resolvedModel: model,
+      };
+    }
+  }
+
+  if (isBudWeb) {
+    const p = pickRoundRobin(providers.filter(p => p.type === 'bud-web'), 'auto:bud');
+    if (p) {
+      return {
+        adapter: getAdapter(p.type as ProviderType),
+        config: dbProviderToConfig(p),
+        resolvedModel: model,
+      };
+    }
+  }
+
+  if (isXAI) {
+    const p = pickRoundRobin(providers.filter(p =>
+      p.base_url?.toLowerCase().includes('api.x.ai') ||
+      p.name.toLowerCase() === 'x' ||
+      p.name.toLowerCase().includes('xai')
+    ), 'auto:xai');
+    if (p) {
+      return {
+        adapter: getAdapter(p.type as ProviderType),
+        config: dbProviderToConfig(p),
+        resolvedModel: model,
+      };
+    }
+  }
+
+  const matched = providers.filter(p =>
+      (isAnthropic && (p.type === 'anthropic' || p.type === 'anthropic-compatible' || p.type === 'claude-web')) ||
+      (isOpenAI && (p.type === 'openai' || p.type === 'openai-compatible' || p.type === 'chatgpt-web' || p.type === 'bud-web'))
+  );
+
+  const p = pickRoundRobin(matched, `auto:${isAnthropic ? 'anthropic' : 'openai'}`);
+  if (p) {
+    return {
+      adapter: getAdapter(p.type as ProviderType),
+      config: dbProviderToConfig(p),
+      resolvedModel: model,
+    };
+  }
+  return null;
+}
+
+export type FetchModelsResult = {
+  models: (ModelInfo & { provider_id: string; provider_name: string })[];
+  errors: { provider_id: string; provider_name: string; error: string }[];
+};
+
+export async function fetchAllModels(): Promise<FetchModelsResult> {
+  const providers = db.prepare('SELECT * FROM providers WHERE enabled = 1').all() as Provider[];
+  const aliases = db.prepare('SELECT * FROM model_aliases').all() as ModelAlias[];
+  const aliasesByModel = new Map<string, ModelAlias[]>();
+  for (const alias of aliases) {
+    const key = `${alias.provider_id}:${alias.upstream_model}`;
+    const list = aliasesByModel.get(key) ?? [];
+    list.push(alias);
+    aliasesByModel.set(key, list);
+  }
+
+  const models: FetchModelsResult['models'] = [];
+  const errors: FetchModelsResult['errors'] = [];
+
+  await Promise.allSettled(
+    providers.map(async (p) => {
+      try {
+        const config = dbProviderToConfig(p);
+        const adapter = getAdapter(config.type);
+        const fetched = await adapter.listModels(config);
+        for (const m of fetched) {
+          const matchingAliases = aliasesByModel.get(`${p.id}:${m.id}`) ?? [];
+          const replacingAliases = matchingAliases.filter(a => !a.fork);
+          const forkedAliases = matchingAliases.filter(a => !!a.fork);
+
+          if (replacingAliases.length) {
+            for (const alias of replacingAliases) {
+              models.push({
+                ...m,
+                id: alias.alias,
+                name: alias.alias,
+                source_id: m.id,
+                alias_of: m.id,
+                provider_id: p.id,
+                provider_name: p.name,
+              });
+            }
+          } else {
+            models.push({ ...m, source_id: m.id, provider_id: p.id, provider_name: p.name });
+          }
+
+          for (const alias of forkedAliases) {
+            models.push({
+              ...m,
+              id: alias.alias,
+              name: alias.alias,
+              source_id: m.id,
+              alias_of: m.id,
+              forked_alias: true,
+              provider_id: p.id,
+              provider_name: p.name,
+            });
+          }
+        }
+      } catch (err) {
+        errors.push({
+          provider_id: p.id,
+          provider_name: p.name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })
+  );
+
+  return { models, errors };
+}

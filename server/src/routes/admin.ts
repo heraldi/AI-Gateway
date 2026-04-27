@@ -1,0 +1,392 @@
+import { Router } from 'express';
+import { v4 as uuid } from 'uuid';
+import { db, getSetting, setSetting } from '../db/index.js';
+import { hashApiKey } from '../middleware/auth.js';
+import { fetchAllModels, resolveProvider } from '../providers/registry.js';
+import type { Provider, GatewayKey, RequestLog, ModelAlias } from '../db/index.js';
+
+export const adminRouter = Router();
+
+/** Infer provider type from base URL when not explicitly specified */
+function inferType(baseUrl: string): string {
+  const u = baseUrl.toLowerCase();
+  if (!u)                               return 'openai-compatible';
+  if (u.includes('api.anthropic.com'))  return 'anthropic';
+  if (u.includes('api.z.ai/api/anthropic') || u.includes('api.minimax.io/anthropic') || u.includes('api.minimaxi.com/anthropic') || u.includes('api.kimi.com/coding')) return 'anthropic-compatible';
+  if (u.includes('bud.app'))            return 'bud-web';
+  if (u.includes('app.devin.ai'))       return 'devin-web';
+  if (u.includes('cloudcode-pa.googleapis.com')) return 'gemini-cli';
+  if (u.includes('daily-cloudcode-pa.googleapis.com')) return 'antigravity';
+  if (u.includes('backend-api/codex')) return 'codex';
+  if (u.includes('codewhisperer')) return 'kiro';
+  if (u.includes('api2.cursor.sh')) return 'cursor';
+  if (u.includes('gitlab.com/api/v4')) return 'gitlab';
+  if (u.includes('claude.ai'))          return 'claude-web';
+  if (u.includes('chatgpt.com') || u.includes('chat.openai.com')) return 'chatgpt-web';
+  if (u.includes('api.openai.com'))     return 'openai';
+  if (u.includes('localhost:11434') || u.includes('ollama')) return 'ollama';
+  return 'openai-compatible';
+}
+
+// ─── Stats / Dashboard ────────────────────────────────────────────────────────
+
+adminRouter.get('/stats', (_req, res) => {
+  const now = Date.now();
+  const day = 86_400_000;
+
+  const total = (db.prepare('SELECT COUNT(*) as c FROM request_logs').get() as { c: number }).c;
+  const today = (db.prepare('SELECT COUNT(*) as c FROM request_logs WHERE created_at > ?').get(now - day) as { c: number }).c;
+  const tokensTotal = (db.prepare('SELECT SUM(total_tokens) as t FROM request_logs').get() as { t: number | null }).t ?? 0;
+  const tokensToday = (db.prepare('SELECT SUM(total_tokens) as t FROM request_logs WHERE created_at > ?').get(now - day) as { t: number | null }).t ?? 0;
+  const errors = (db.prepare('SELECT COUNT(*) as c FROM request_logs WHERE status >= 400').get() as { c: number }).c;
+  const activeProviders = (db.prepare('SELECT COUNT(*) as c FROM providers WHERE enabled = 1').get() as { c: number }).c;
+
+  const perModel = db.prepare(`
+    SELECT model, COUNT(*) as requests, SUM(total_tokens) as tokens
+    FROM request_logs WHERE model IS NOT NULL GROUP BY model ORDER BY requests DESC LIMIT 10
+  `).all() as { model: string; requests: number; tokens: number }[];
+
+  const hourly = db.prepare(`
+    SELECT
+      (created_at / 3600000) * 3600000 as hour,
+      COUNT(*) as requests,
+      SUM(total_tokens) as tokens
+    FROM request_logs
+    WHERE created_at > ?
+    GROUP BY hour ORDER BY hour
+  `).all(now - day * 7) as { hour: number; requests: number; tokens: number }[];
+
+  res.json({ total, today, tokensTotal, tokensToday, errors, activeProviders, perModel, hourly });
+});
+
+// ─── Providers ─────────────────────────────────────────────────────────────────
+
+adminRouter.get('/providers', (_req, res) => {
+  const providers = db.prepare('SELECT * FROM providers ORDER BY priority DESC, created_at ASC').all() as Provider[];
+  // Mask api_key partially
+  res.json(providers.map(p => ({
+    ...p,
+    api_key: p.api_key ? `${p.api_key.slice(0, 8)}...` : null,
+    cookies: p.cookies ? '[configured]' : null,
+    auth_type: (() => {
+      try {
+        const parsed = p.cookies ? JSON.parse(p.cookies) as Record<string, unknown> : {};
+        if (typeof parsed.oauth_provider === 'string') return 'oauth';
+      } catch {
+        // fall through
+      }
+      return p.cookies ? 'cookies' : (p.api_key ? 'key' : null);
+    })(),
+  })));
+});
+
+adminRouter.get('/providers/:id', (req, res) => {
+  const p = db.prepare('SELECT * FROM providers WHERE id = ?').get(req.params.id) as Provider | undefined;
+  if (!p) { res.status(404).json({ error: 'Not found' }); return; }
+  res.json(p);
+});
+
+adminRouter.post('/providers', (req, res) => {
+  const { name, base_url, api_key, cookies, extra_headers, notes, priority = 0 } = req.body as {
+    name: string; base_url?: string; api_key?: string;
+    cookies?: object; extra_headers?: object; notes?: string; priority?: number;
+  };
+  // type may be sent from frontend (already detected) or auto-detected here
+  const type: string = (req.body as { type?: string }).type || inferType(base_url ?? '');
+
+  if (!name) { res.status(400).json({ error: 'name is required' }); return; }
+
+  const id = uuid();
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO providers (id, name, type, base_url, api_key, cookies, extra_headers, notes, priority, enabled, created_at, updated_at)
+    VALUES (@id, @name, @type, @base_url, @api_key, @cookies, @extra_headers, @notes, @priority, 1, @now, @now)
+  `).run({
+    id, name, type,
+    base_url: base_url ?? null,
+    api_key: api_key ?? null,
+    cookies: cookies ? JSON.stringify(cookies) : null,
+    extra_headers: extra_headers ? JSON.stringify(extra_headers) : null,
+    notes: notes ?? null,
+    priority,
+    now,
+  });
+  res.status(201).json({ id });
+});
+
+adminRouter.put('/providers/:id', (req, res) => {
+  const p = db.prepare('SELECT * FROM providers WHERE id = ?').get(req.params.id) as Provider | undefined;
+  if (!p) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const { name, type, base_url, api_key, cookies, extra_headers, notes, priority, enabled } = req.body as Partial<Provider & { cookies: object; extra_headers: object }>;
+  db.prepare(`
+    UPDATE providers SET
+      name = @name, type = @type, base_url = @base_url, api_key = @api_key,
+      cookies = @cookies, extra_headers = @extra_headers, notes = @notes,
+      priority = @priority, enabled = @enabled, updated_at = @now
+    WHERE id = @id
+  `).run({
+    id: req.params.id,
+    name: name ?? p.name,
+    type: type ?? p.type,
+    base_url: base_url ?? p.base_url,
+    api_key: api_key ?? p.api_key,
+    cookies: cookies !== undefined ? (cookies ? JSON.stringify(cookies) : null) : p.cookies,
+    extra_headers: extra_headers !== undefined ? (extra_headers ? JSON.stringify(extra_headers) : null) : p.extra_headers,
+    notes: notes ?? p.notes,
+    priority: priority ?? p.priority,
+    enabled: enabled !== undefined ? (enabled ? 1 : 0) : p.enabled,
+    now: Date.now(),
+  });
+  res.json({ ok: true });
+});
+
+adminRouter.delete('/providers/:id', (req, res) => {
+  db.prepare('DELETE FROM providers WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// ─── Cookie update (from Chrome extension) ─────────────────────────────────────
+
+adminRouter.post('/providers/:id/cookies', (req, res) => {
+  const p = db.prepare('SELECT id FROM providers WHERE id = ?').get(req.params.id) as { id: string } | undefined;
+  if (!p) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const { cookies } = req.body as { cookies: Record<string, string> };
+  if (!cookies || typeof cookies !== 'object') { res.status(400).json({ error: 'cookies object required' }); return; }
+
+  db.prepare('UPDATE providers SET cookies = ?, updated_at = ? WHERE id = ?')
+    .run(JSON.stringify(cookies), Date.now(), req.params.id);
+  res.json({ ok: true, message: 'Cookies updated successfully' });
+});
+
+// ─── Model Routes ──────────────────────────────────────────────────────────────
+
+adminRouter.get('/model-routes', (_req, res) => {
+  const rows = db.prepare(`
+    SELECT mr.*, p.name as provider_name FROM model_routes mr
+    JOIN providers p ON p.id = mr.provider_id ORDER BY length(mr.pattern) DESC
+  `).all();
+  res.json(rows);
+});
+
+adminRouter.post('/model-routes', (req, res) => {
+  const { pattern, provider_id, model_override } = req.body as { pattern: string; provider_id: string; model_override?: string };
+  if (!pattern || !provider_id) { res.status(400).json({ error: 'pattern and provider_id required' }); return; }
+  const id = uuid();
+  db.prepare('INSERT INTO model_routes (id, pattern, provider_id, model_override, enabled) VALUES (?, ?, ?, ?, 1)')
+    .run(id, pattern, provider_id, model_override ?? null);
+  res.status(201).json({ id });
+});
+
+adminRouter.delete('/model-routes/:id', (req, res) => {
+  db.prepare('DELETE FROM model_routes WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// Model aliases are client-visible model names mapped to one upstream provider/model.
+adminRouter.get('/model-aliases', (_req, res) => {
+  const rows = db.prepare(`
+    SELECT ma.*, p.name as provider_name
+    FROM model_aliases ma
+    JOIN providers p ON p.id = ma.provider_id
+    ORDER BY ma.alias ASC
+  `).all();
+  res.json(rows);
+});
+
+adminRouter.post('/model-aliases', (req, res) => {
+  const { alias, provider_id, upstream_model, fork = false } = req.body as {
+    alias?: string; provider_id?: string; upstream_model?: string; fork?: boolean;
+  };
+  const cleanAlias = alias?.trim();
+  const cleanModel = upstream_model?.trim();
+  if (!cleanAlias || !provider_id || !cleanModel) {
+    res.status(400).json({ error: 'alias, provider_id, and upstream_model are required' });
+    return;
+  }
+  if (cleanAlias === cleanModel) {
+    res.status(400).json({ error: 'alias must be different from upstream_model' });
+    return;
+  }
+  const provider = db.prepare('SELECT id FROM providers WHERE id = ?').get(provider_id) as { id: string } | undefined;
+  if (!provider) { res.status(404).json({ error: 'provider not found' }); return; }
+
+  const now = Date.now();
+  try {
+    db.prepare(`
+      INSERT INTO model_aliases (id, alias, provider_id, upstream_model, fork, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(uuid(), cleanAlias, provider_id, cleanModel, fork ? 1 : 0, now, now);
+    res.status(201).json({ ok: true });
+  } catch (err) {
+    res.status(409).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+adminRouter.put('/model-aliases/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM model_aliases WHERE id = ?').get(req.params.id) as ModelAlias | undefined;
+  if (!row) { res.status(404).json({ error: 'alias not found' }); return; }
+  const { alias, provider_id, upstream_model, fork } = req.body as {
+    alias?: string; provider_id?: string; upstream_model?: string; fork?: boolean;
+  };
+  const cleanAlias = typeof alias === 'string' ? alias.trim() : row.alias;
+  const cleanModel = typeof upstream_model === 'string' ? upstream_model.trim() : row.upstream_model;
+  if (!cleanAlias || !cleanModel) { res.status(400).json({ error: 'alias and upstream_model are required' }); return; }
+  if (cleanAlias === cleanModel) { res.status(400).json({ error: 'alias must be different from upstream_model' }); return; }
+
+  try {
+    db.prepare(`
+      UPDATE model_aliases SET alias = ?, provider_id = ?, upstream_model = ?, fork = ?, updated_at = ?
+      WHERE id = ?
+    `).run(cleanAlias, provider_id ?? row.provider_id, cleanModel, fork !== undefined ? (fork ? 1 : 0) : row.fork, Date.now(), req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(409).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+adminRouter.delete('/model-aliases/:id', (req, res) => {
+  db.prepare('DELETE FROM model_aliases WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// ─── Settings ────────────────────────────────────────────────────────────────
+
+adminRouter.get('/settings', (_req, res) => {
+  const tokenSaver = getSetting('token_saver_enabled', process.env.TOKEN_SAVER ?? 'false');
+  res.json({
+    token_saver_enabled: tokenSaver === '1' || tokenSaver.toLowerCase() === 'true',
+  });
+});
+
+adminRouter.put('/settings', (req, res) => {
+  const body = req.body as { token_saver_enabled?: boolean };
+  if (body.token_saver_enabled !== undefined) {
+    setSetting('token_saver_enabled', body.token_saver_enabled ? 'true' : 'false');
+  }
+  res.json({ ok: true });
+});
+
+// ─── Gateway Keys ─────────────────────────────────────────────────────────────
+
+adminRouter.get('/keys', (_req, res) => {
+  const keys = db.prepare('SELECT * FROM gateway_keys ORDER BY created_at DESC').all() as GatewayKey[];
+  res.json(keys.map(k => ({ ...k, key_hash: undefined })));
+});
+
+adminRouter.post('/keys', (req, res) => {
+  const { name } = req.body as { name?: string };
+  const rawKey = `sk-gw-${uuid().replace(/-/g, '')}`;
+  const hash = hashApiKey(rawKey);
+  const preview = `${rawKey.slice(0, 12)}...${rawKey.slice(-4)}`;
+  const id = uuid();
+  db.prepare('INSERT INTO gateway_keys (id, key_hash, key_preview, name, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)')
+    .run(id, hash, preview, name ?? null, Date.now());
+  // Return the raw key ONCE - it won't be shown again
+  res.status(201).json({ id, key: rawKey, preview, name });
+});
+
+adminRouter.delete('/keys/:id', (req, res) => {
+  db.prepare('DELETE FROM gateway_keys WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+adminRouter.patch('/keys/:id', (req, res) => {
+  const { enabled, name } = req.body as { enabled?: boolean; name?: string };
+  if (enabled !== undefined) db.prepare('UPDATE gateway_keys SET enabled = ? WHERE id = ?').run(enabled ? 1 : 0, req.params.id);
+  if (name !== undefined) db.prepare('UPDATE gateway_keys SET name = ? WHERE id = ?').run(name, req.params.id);
+  res.json({ ok: true });
+});
+
+// ─── Request Logs ─────────────────────────────────────────────────────────────
+
+adminRouter.get('/logs', (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page as string) || 1);
+  const limit = Math.min(100, parseInt(req.query.limit as string) || 50);
+  const offset = (page - 1) * limit;
+  const model = req.query.model as string | undefined;
+  const provider = req.query.provider as string | undefined;
+  const status = req.query.status as string | undefined;
+
+  let where = 'WHERE 1=1';
+  const params: (string | number)[] = [];
+  if (model) { where += ' AND model = ?'; params.push(model); }
+  if (provider) { where += ' AND provider_id = ?'; params.push(provider); }
+  if (status === 'error') { where += ' AND status >= 400'; }
+  else if (status === 'ok') { where += ' AND status < 400'; }
+
+  const total = (db.prepare(`SELECT COUNT(*) as c FROM request_logs ${where}`).get(...params) as { c: number }).c;
+  const logs = db.prepare(`SELECT * FROM request_logs ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as RequestLog[];
+
+  res.json({ logs, total, page, limit, pages: Math.ceil(total / limit) });
+});
+
+adminRouter.delete('/logs', (_req, res) => {
+  db.prepare('DELETE FROM request_logs').run();
+  res.json({ ok: true });
+});
+
+// ─── Available Models ─────────────────────────────────────────────────────────
+
+adminRouter.get('/models', async (_req, res) => {
+  try {
+    const result = await fetchAllModels();
+    res.json(result); // { models: [...], errors: [...] }
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+adminRouter.post('/models/test', async (req, res) => {
+  const startedAt = Date.now();
+  const { model, prompt } = req.body as { model?: string; prompt?: string };
+  if (!model) { res.status(400).json({ error: 'model is required' }); return; }
+
+  const resolved = resolveProvider(model);
+  if (!resolved) { res.status(404).json({ error: `No provider found for model: ${model}` }); return; }
+
+  const { adapter, config, resolvedModel } = resolved;
+  if (model.startsWith('grok-imagine-')) {
+    res.json({
+      ok: false,
+      model,
+      resolvedModel,
+      provider: { id: config.id, name: config.name, type: config.type },
+      latency: Date.now() - startedAt,
+      error: 'This is an xAI image/video model, not a chat completion model. Use a Grok chat model such as grok-3, grok-4-0709, grok-4-fast-reasoning, or grok-code-fast-1.',
+    });
+    return;
+  }
+
+  try {
+    const result = await adapter.complete(config, {
+      model: resolvedModel,
+      messages: [{ role: 'user', content: prompt || 'Reply with a short OK if this model is working.' }],
+      max_tokens: 128,
+      temperature: 0.2,
+    });
+    res.json({
+      ok: true,
+      model,
+      resolvedModel,
+      provider: { id: config.id, name: config.name, type: config.type },
+      latency: Date.now() - startedAt,
+      content: result.content,
+      usage: {
+        input_tokens: result.input_tokens,
+        output_tokens: result.output_tokens,
+        total_tokens: result.input_tokens + result.output_tokens,
+      },
+    });
+  } catch (err) {
+    res.status(200).json({
+      ok: false,
+      model,
+      resolvedModel,
+      provider: { id: config.id, name: config.name, type: config.type },
+      latency: Date.now() - startedAt,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});

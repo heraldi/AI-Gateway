@@ -1,0 +1,33 @@
+<!doctype html>
+<!-- Open this file in a browser, right-click each canvas, save as icon16/48/128.png -->
+<body style="background:#0d1117;padding:20px;display:flex;gap:20px;align-items:flex-end">
+<script>
+function drawIcon(size) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  c.title = `icon${size}.png`;
+  const ctx = c.getContext('2d');
+  const r = size / 2;
+
+  // BG
+  ctx.fillStyle = '#161b22';
+  ctx.beginPath();
+  ctx.roundRect(0, 0, size, size, size * 0.2);
+  ctx.fill();
+
+  // Lightning bolt ⚡
+  ctx.fillStyle = '#58a6ff';
+  ctx.font = `bold ${size * 0.65}px serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('⚡', r, r + size * 0.02);
+
+  document.body.appendChild(c);
+  const label = document.createElement('div');
+  label.style = 'color:#8b949e;font-size:11px;font-family:monospace;text-align:center;margin-top:4px';
+  label.textContent = `icon${size}.png`;
+  document.body.appendChild(label);
+}
+[16,48,128].forEach(drawIcon);
+</script>
+</body>
