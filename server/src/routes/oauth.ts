@@ -13,23 +13,23 @@ type OAuthStatus =
   | { status: 'complete'; provider: OAuthProvider; createdAt: number; providerId: string; email?: string }
   | { status: 'error'; provider: OAuthProvider; createdAt: number; error: string };
 
-const IFLOW_CLIENT_ID = process.env.IFLOW_CLIENT_ID ?? '10009311001';
-const IFLOW_CLIENT_SECRET = process.env.IFLOW_CLIENT_SECRET ?? '4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW';
+const IFLOW_CLIENT_ID = process.env.IFLOW_CLIENT_ID ?? '';
+const IFLOW_CLIENT_SECRET = process.env.IFLOW_CLIENT_SECRET ?? '';
 const IFLOW_AUTHORIZE_URL = 'https://iflow.cn/oauth';
 const IFLOW_TOKEN_URL = 'https://iflow.cn/oauth/token';
 const IFLOW_USERINFO_URL = 'https://iflow.cn/api/oauth/getUserInfo';
 const IFLOW_BASE_URL = 'https://apis.iflow.cn/v1';
 
-const QWEN_CLIENT_ID = process.env.QWEN_CLIENT_ID ?? 'f0304373b74a44d2b584a3fb70ca9e56';
+const QWEN_CLIENT_ID = process.env.QWEN_CLIENT_ID ?? '';
 const QWEN_DEVICE_CODE_URL = process.env.QWEN_DEVICE_CODE_URL ?? 'https://chat.qwen.ai/api/v1/oauth2/device/code';
 const QWEN_TOKEN_URL = process.env.QWEN_TOKEN_URL ?? 'https://chat.qwen.ai/api/v1/oauth2/token';
 const QWEN_SCOPE = 'openid profile email model.completion';
 
-const GITHUB_CLIENT_ID = process.env.GITHUB_OAUTH_CLIENT_ID ?? 'Iv1.b507a08c87ecfe98';
-const KIMI_CODING_CLIENT_ID = process.env.KIMI_CODING_OAUTH_CLIENT_ID ?? '17e5f671-d194-4dfb-9706-5516cb48c098';
+const GITHUB_CLIENT_ID = process.env.GITHUB_OAUTH_CLIENT_ID ?? '';
+const KIMI_CODING_CLIENT_ID = process.env.KIMI_CODING_OAUTH_CLIENT_ID ?? '';
 const KILOCODE_BASE_URL = 'https://api.kilo.ai';
 const CODEBUDDY_BASE_URL = 'https://copilot.tencent.com';
-const CLAUDE_CLIENT_ID = process.env.CLAUDE_OAUTH_CLIENT_ID ?? '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const CLAUDE_CLIENT_ID = process.env.CLAUDE_OAUTH_CLIENT_ID ?? '';
 const CLAUDE_AUTHORIZE_URL = 'https://claude.ai/oauth/authorize';
 const CLAUDE_TOKEN_URL = 'https://api.anthropic.com/v1/oauth/token';
 const CLAUDE_SCOPE = 'org:create_api_key user:profile user:inference';
@@ -37,11 +37,11 @@ const CLINE_AUTHORIZE_URL = 'https://api.cline.bot/api/v1/auth/authorize';
 const CLINE_TOKEN_EXCHANGE_URL = 'https://api.cline.bot/api/v1/auth/token';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_USERINFO_URL = 'https://www.googleapis.com/oauth2/v1/userinfo';
-const GEMINI_CLIENT_ID = process.env.GEMINI_OAUTH_CLIENT_ID ?? '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com';
-const GEMINI_CLIENT_SECRET = process.env.GEMINI_OAUTH_CLIENT_SECRET ?? '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';
-const ANTIGRAVITY_CLIENT_ID = process.env.ANTIGRAVITY_OAUTH_CLIENT_ID ?? '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com';
-const ANTIGRAVITY_CLIENT_SECRET = process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET ?? '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';
-const CODEX_CLIENT_ID = process.env.CODEX_OAUTH_CLIENT_ID ?? 'app_EMoamEEZ73f0CkXaXp7hrann';
+const GEMINI_CLIENT_ID = process.env.GEMINI_OAUTH_CLIENT_ID ?? '';
+const GEMINI_CLIENT_SECRET = process.env.GEMINI_OAUTH_CLIENT_SECRET ?? '';
+const ANTIGRAVITY_CLIENT_ID = process.env.ANTIGRAVITY_OAUTH_CLIENT_ID ?? '';
+const ANTIGRAVITY_CLIENT_SECRET = process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET ?? '';
+const CODEX_CLIENT_ID = process.env.CODEX_OAUTH_CLIENT_ID ?? '';
 const CODEX_AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize';
 const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const KIRO_START_URL = 'https://view.awsapps.com/start';
@@ -75,6 +75,14 @@ function localAppPort(req: { get(name: string): string | undefined }): number {
   return Number.isFinite(parsed) ? parsed : 3000;
 }
 
+function requireOauthEnv(name: string, value: string, provider: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`${provider} OAuth is not configured. Set ${name} in server/.env and restart the server.`);
+  }
+  return trimmed;
+}
+
 function stopCodexProxy(): void {
   if (codexProxyTimer) clearTimeout(codexProxyTimer);
   codexProxyTimer = null;
@@ -106,20 +114,22 @@ async function startCodexProxy(appPort: number): Promise<void> {
 }
 
 function buildIflowAuthUrl(redirectUri: string, state: string): string {
+  const clientId = requireOauthEnv('IFLOW_CLIENT_ID', IFLOW_CLIENT_ID, 'iFlow');
   const params = new URLSearchParams({
     loginMethod: 'phone',
     type: 'phone',
     redirect: redirectUri,
     state,
-    client_id: IFLOW_CLIENT_ID,
+    client_id: clientId,
   });
   return `${IFLOW_AUTHORIZE_URL}?${params}`;
 }
 
 function buildClaudeAuthUrl(redirectUri: string, state: string, codeChallenge: string): string {
+  const clientId = requireOauthEnv('CLAUDE_OAUTH_CLIENT_ID', CLAUDE_CLIENT_ID, 'Claude');
   const params = new URLSearchParams({
     code: 'true',
-    client_id: CLAUDE_CLIENT_ID,
+    client_id: clientId,
     response_type: 'code',
     redirect_uri: redirectUri,
     scope: CLAUDE_SCOPE,
@@ -140,6 +150,9 @@ function buildClineAuthUrl(redirectUri: string): string {
 }
 
 function buildGoogleAuthUrl(provider: 'gemini-cli' | 'antigravity', redirectUri: string, state: string): string {
+  const clientId = provider === 'antigravity'
+    ? requireOauthEnv('ANTIGRAVITY_OAUTH_CLIENT_ID', ANTIGRAVITY_CLIENT_ID, 'Antigravity')
+    : requireOauthEnv('GEMINI_OAUTH_CLIENT_ID', GEMINI_CLIENT_ID, 'Gemini CLI');
   const scopes = provider === 'antigravity'
     ? [
         'https://www.googleapis.com/auth/cloud-platform',
@@ -154,7 +167,7 @@ function buildGoogleAuthUrl(provider: 'gemini-cli' | 'antigravity', redirectUri:
         'https://www.googleapis.com/auth/userinfo.profile',
       ];
   const params = new URLSearchParams({
-    client_id: provider === 'antigravity' ? ANTIGRAVITY_CLIENT_ID : GEMINI_CLIENT_ID,
+    client_id: clientId,
     response_type: 'code',
     redirect_uri: redirectUri,
     scope: scopes.join(' '),
@@ -166,9 +179,10 @@ function buildGoogleAuthUrl(provider: 'gemini-cli' | 'antigravity', redirectUri:
 }
 
 function buildCodexAuthUrl(redirectUri: string, state: string, codeChallenge: string): string {
+  const clientId = requireOauthEnv('CODEX_OAUTH_CLIENT_ID', CODEX_CLIENT_ID, 'Codex');
   const params = new URLSearchParams({
     response_type: 'code',
-    client_id: CODEX_CLIENT_ID,
+    client_id: clientId,
     redirect_uri: redirectUri,
     scope: 'openid profile email offline_access',
     code_challenge: codeChallenge,
@@ -215,7 +229,9 @@ async function readJson(res: Response): Promise<Record<string, unknown>> {
 }
 
 async function exchangeIflowCode(code: string, redirectUri: string): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number }> {
-  const basicAuth = Buffer.from(`${IFLOW_CLIENT_ID}:${IFLOW_CLIENT_SECRET}`).toString('base64');
+  const clientId = requireOauthEnv('IFLOW_CLIENT_ID', IFLOW_CLIENT_ID, 'iFlow');
+  const clientSecret = requireOauthEnv('IFLOW_CLIENT_SECRET', IFLOW_CLIENT_SECRET, 'iFlow');
+  const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
   const res = await fetch(IFLOW_TOKEN_URL, {
     method: 'POST',
     headers: {
@@ -227,8 +243,8 @@ async function exchangeIflowCode(code: string, redirectUri: string): Promise<{ a
       grant_type: 'authorization_code',
       code,
       redirect_uri: redirectUri,
-      client_id: IFLOW_CLIENT_ID,
-      client_secret: IFLOW_CLIENT_SECRET,
+      client_id: clientId,
+      client_secret: clientSecret,
     }),
   });
   const json = await readJson(res);
@@ -265,6 +281,7 @@ async function exchangeClaudeCode(
   codeVerifier: string,
   state: string,
 ): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scope?: string }> {
+  const clientId = requireOauthEnv('CLAUDE_OAUTH_CLIENT_ID', CLAUDE_CLIENT_ID, 'Claude');
   let authCode = code;
   let codeState = '';
   if (authCode.includes('#')) {
@@ -280,7 +297,7 @@ async function exchangeClaudeCode(
       code: authCode,
       state: codeState || state,
       grant_type: 'authorization_code',
-      client_id: CLAUDE_CLIENT_ID,
+      client_id: clientId,
       redirect_uri: redirectUri,
       code_verifier: codeVerifier,
     }),
@@ -341,8 +358,12 @@ async function exchangeClineCode(code: string, redirectUri: string): Promise<{ a
 }
 
 async function exchangeGoogleCode(provider: 'gemini-cli' | 'antigravity', code: string, redirectUri: string): Promise<{ accessToken: string; refreshToken?: string; email?: string; expiresIn?: number; projectId?: string }> {
-  const clientId = provider === 'antigravity' ? ANTIGRAVITY_CLIENT_ID : GEMINI_CLIENT_ID;
-  const clientSecret = provider === 'antigravity' ? ANTIGRAVITY_CLIENT_SECRET : GEMINI_CLIENT_SECRET;
+  const clientId = provider === 'antigravity'
+    ? requireOauthEnv('ANTIGRAVITY_OAUTH_CLIENT_ID', ANTIGRAVITY_CLIENT_ID, 'Antigravity')
+    : requireOauthEnv('GEMINI_OAUTH_CLIENT_ID', GEMINI_CLIENT_ID, 'Gemini CLI');
+  const clientSecret = provider === 'antigravity'
+    ? requireOauthEnv('ANTIGRAVITY_OAUTH_CLIENT_SECRET', ANTIGRAVITY_CLIENT_SECRET, 'Antigravity')
+    : requireOauthEnv('GEMINI_OAUTH_CLIENT_SECRET', GEMINI_CLIENT_SECRET, 'Gemini CLI');
   const res = await fetch(GOOGLE_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
@@ -385,12 +406,13 @@ async function exchangeGoogleCode(provider: 'gemini-cli' | 'antigravity', code: 
 }
 
 async function exchangeCodexCode(code: string, redirectUri: string, codeVerifier: string): Promise<{ accessToken: string; refreshToken?: string; email?: string; expiresIn?: number; idToken?: string }> {
+  const clientId = requireOauthEnv('CODEX_OAUTH_CLIENT_ID', CODEX_CLIENT_ID, 'Codex');
   const res = await fetch(CODEX_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
     body: new URLSearchParams({
       grant_type: 'authorization_code',
-      client_id: CODEX_CLIENT_ID,
+      client_id: clientId,
       code,
       redirect_uri: redirectUri,
       code_verifier: codeVerifier,
@@ -626,10 +648,11 @@ async function startDeviceFlow(provider: OAuthProvider): Promise<DeviceStart> {
   if (provider === 'qwen') return startQwenDeviceFlow();
 
   if (provider === 'github') {
+    const clientId = requireOauthEnv('GITHUB_OAUTH_CLIENT_ID', GITHUB_CLIENT_ID, 'GitHub Copilot');
     const res = await fetch('https://github.com/login/device/code', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-      body: new URLSearchParams({ client_id: GITHUB_CLIENT_ID, scope: 'read:user' }),
+      body: new URLSearchParams({ client_id: clientId, scope: 'read:user' }),
     });
     const json = await readJson(res);
     if (!res.ok || typeof json.device_code !== 'string') throw new Error(`GitHub device-code failed ${res.status}: ${JSON.stringify(json)}`);
@@ -643,10 +666,11 @@ async function startDeviceFlow(provider: OAuthProvider): Promise<DeviceStart> {
   }
 
   if (provider === 'kimi-coding') {
+    const clientId = requireOauthEnv('KIMI_CODING_OAUTH_CLIENT_ID', KIMI_CODING_CLIENT_ID, 'Kimi Coding');
     const res = await fetch('https://auth.kimi.com/api/oauth/device_authorization', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-      body: new URLSearchParams({ client_id: KIMI_CODING_CLIENT_ID }),
+      body: new URLSearchParams({ client_id: clientId }),
     });
     const json = await readJson(res);
     if (!res.ok || typeof json.device_code !== 'string') throw new Error(`Kimi device-code failed ${res.status}: ${JSON.stringify(json)}`);
@@ -759,6 +783,7 @@ async function startQwenDeviceFlow(): Promise<{
   intervalMs: number;
   codeVerifier: string;
 }> {
+  const clientId = requireOauthEnv('QWEN_CLIENT_ID', QWEN_CLIENT_ID, 'Qwen');
   const { verifier, challenge } = pkcePair();
   const res = await fetch(QWEN_DEVICE_CODE_URL, {
     method: 'POST',
@@ -767,7 +792,7 @@ async function startQwenDeviceFlow(): Promise<{
       Accept: 'application/json',
     },
     body: new URLSearchParams({
-      client_id: QWEN_CLIENT_ID,
+      client_id: clientId,
       scope: QWEN_SCOPE,
       code_challenge: challenge,
       code_challenge_method: 'S256',
@@ -790,6 +815,7 @@ async function startQwenDeviceFlow(): Promise<{
 
 async function pollQwenToken(session: Extract<OAuthStatus, { status: 'pending' }>): Promise<OAuthStatus> {
   if (!session.deviceCode || !session.codeVerifier) throw new Error('Qwen OAuth session is missing device_code or code_verifier.');
+  const clientId = requireOauthEnv('QWEN_CLIENT_ID', QWEN_CLIENT_ID, 'Qwen');
   if (Date.now() - (session.lastPollAt ?? 0) < (session.intervalMs ?? 5000)) return session;
   session.lastPollAt = Date.now();
 
@@ -801,7 +827,7 @@ async function pollQwenToken(session: Extract<OAuthStatus, { status: 'pending' }
     },
     body: new URLSearchParams({
       grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-      client_id: QWEN_CLIENT_ID,
+      client_id: clientId,
       device_code: session.deviceCode,
       code_verifier: session.codeVerifier,
     }),
@@ -833,11 +859,12 @@ async function pollGenericDeviceProvider(session: Extract<OAuthStatus, { status:
   session.lastPollAt = Date.now();
 
   if (session.provider === 'github') {
+    const clientId = requireOauthEnv('GITHUB_OAUTH_CLIENT_ID', GITHUB_CLIENT_ID, 'GitHub Copilot');
     const res = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
       body: new URLSearchParams({
-        client_id: GITHUB_CLIENT_ID,
+        client_id: clientId,
         device_code: session.deviceCode,
         grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
       }),
@@ -900,12 +927,13 @@ async function pollGenericDeviceProvider(session: Extract<OAuthStatus, { status:
   }
 
   if (session.provider === 'kimi-coding') {
+    const clientId = requireOauthEnv('KIMI_CODING_OAUTH_CLIENT_ID', KIMI_CODING_CLIENT_ID, 'Kimi Coding');
     const res = await fetch('https://auth.kimi.com/api/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
       body: new URLSearchParams({
         grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-        client_id: KIMI_CODING_CLIENT_ID,
+        client_id: clientId,
         device_code: session.deviceCode,
       }),
     });
