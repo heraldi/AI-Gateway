@@ -4,7 +4,7 @@ WORKDIR /app
 # ── Install dashboard deps & build ──────────────────────────────────────────
 FROM base AS dashboard-build
 COPY dashboard/package*.json ./dashboard/
-RUN cd dashboard && npm ci
+RUN cd dashboard && npm install
 COPY dashboard ./dashboard
 RUN cd dashboard && npm run build
 
@@ -12,7 +12,7 @@ RUN cd dashboard && npm run build
 FROM base AS server-build
 COPY server/package*.json ./server/
 COPY server/tsconfig.json ./server/
-RUN cd server && npm ci
+RUN cd server && npm install
 COPY server/src ./server/src
 RUN cd server && npm run build
 
