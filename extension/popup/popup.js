@@ -1,6 +1,8 @@
 (() => {
   let currentTab = null;
   let providers = [];
+  let providerAccounts = {};
+  const WEB_COOKIE_TYPES = new Set(['claude-web', 'chatgpt-web', 'bud-web', 'devin-web', 'perplexity-web']);
 
   const $ = id => document.getElementById(id);
 
@@ -94,6 +96,7 @@
       const sameDomain = !!(tabHostname && provHostname && tabHostname === provHostname);
       const btnCls = sameDomain ? 'btn btn-push same-domain' : 'btn btn-push';
       const btnLabel = sameDomain ? 'Extract from current tab' : 'Extract &amp; Push';
+      const accounts = providerAccounts[p.id] || [];
 
       return `<div class="provider-card">
         <div class="provider-head">
@@ -102,9 +105,24 @@
           ${sameDomain ? '<span class="badge badge-green">Active tab</span>' : ''}
         </div>
         ${p.base_url ? `<div class="provider-url">${esc(p.base_url)}</div>` : ''}
+        <div class="account-row">
+          <select class="account-select" data-id="${p.id}">
+            <option value="__auto__">Auto account</option>
+            ${accounts.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('')}
+            <option value="__new__">New account...</option>
+          </select>
+          <input class="account-name" data-id="${p.id}" placeholder="Account name" style="display:none" />
+        </div>
         <button class="${btnCls}" data-id="${p.id}">${btnLabel}</button>
       </div>`;
     }).join('');
+
+    list.querySelectorAll('.account-select').forEach(select => {
+      const input = list.querySelector(`.account-name[data-id="${CSS.escape(select.dataset.id)}"]`);
+      select.addEventListener('change', () => {
+        if (input) input.style.display = select.value === '__new__' ? 'block' : 'none';
+      });
+    });
 
     list.querySelectorAll('button[data-id]').forEach(btn => {
       btn.addEventListener('click', () => handlePush(btn.dataset.id, btn));
@@ -118,16 +136,21 @@
       return;
     }
     btn.disabled = true;
+    const select = document.querySelector(`.account-select[data-id="${CSS.escape(providerId)}"]`);
+    const accountNameInput = document.querySelector(`.account-name[data-id="${CSS.escape(providerId)}"]`);
+    const accountId = select?.value && select.value !== '__auto__' && select.value !== '__new__' ? select.value : '';
+    const accountName = select?.value === '__new__' ? accountNameInput?.value.trim() : '';
     btn.textContent = 'Pushing…';
 
     chrome.runtime.sendMessage(
-      { type: 'EXTRACT_AND_PUSH', providerId, tabUrl: currentTab.url, tabId: currentTab.id },
+      { type: 'EXTRACT_AND_PUSH', providerId, tabUrl: currentTab.url, tabId: currentTab.id, accountId, accountName },
       res => {
         btn.disabled = false;
         const ok = res?.success;
         btn.textContent = ok ? 'Pushed!' : 'Extract & Push';
         showMsg('extractMsg', res?.message || 'Unknown error', ok ? 'ok' : 'err');
         if (ok) {
+          fetchAccounts(providerId);
           setTimeout(() => {
             btn.textContent = 'Extract & Push';
             hideMsg('extractMsg');
@@ -142,11 +165,21 @@
     $('providersList').innerHTML = '<div class="empty">Loading providers…</div>';
     chrome.runtime.sendMessage({ type: 'FETCH_PROVIDERS' }, res => {
       if (res?.success) {
-        providers = (res.providers || []).filter(p => p.enabled);
+        providers = (res.providers || []).filter(p => p.enabled && WEB_COOKIE_TYPES.has(p.type));
         renderProviders();
+        providers.forEach(p => fetchAccounts(p.id));
       } else {
         $('providersList').innerHTML =
           `<div class="empty">Cannot reach gateway.<br><small>${esc(res?.message || '')}</small></div>`;
+      }
+    });
+  }
+
+  function fetchAccounts(providerId) {
+    chrome.runtime.sendMessage({ type: 'FETCH_PROVIDER_ACCOUNTS', providerId }, res => {
+      if (res?.success) {
+        providerAccounts = { ...providerAccounts, [providerId]: res.accounts || [] };
+        renderProviders();
       }
     });
   }

@@ -1,5 +1,6 @@
 import "dotenv/config";
 import "express-async-errors";
+import { randomUUID } from "crypto";
 import express from "express";
 import cors from "cors";
 import { join, dirname } from "path";
@@ -9,6 +10,7 @@ import { anthropicRouter } from "./routes/anthropic.js";
 import { adminRouter } from "./routes/admin.js";
 import { oauthAdminRouter, oauthPublicRouter } from "./routes/oauth.js";
 import { requireGatewayKey, requireAdminPassword } from "./middleware/auth.js";
+import { db, type ProviderAccount } from "./db/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -55,6 +57,141 @@ app.use("/api", requireAdminPassword, adminRouter);
 // OAuth callback routes cannot require custom headers because providers redirect here.
 app.use("/oauth", oauthPublicRouter);
 app.use("/", oauthPublicRouter);
+
+function extensionAuthorized(req: express.Request, res: express.Response): boolean {
+  const token = req.headers["x-extension-token"] as string | undefined;
+  const extToken = process.env.EXTENSION_TOKEN ?? "ext-token-change-me";
+  if (token !== extToken) {
+    res.status(401).json({ error: "Invalid extension token" });
+    return false;
+  }
+  return true;
+}
+
+function parseRecord(value: string | null | undefined): Record<string, string> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, string>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function mergeWebCookieHeaders(type: string, cookies: Record<string, string>, baseHeaders: Record<string, string>): Record<string, string> {
+  const extraHeaders = { ...baseHeaders };
+  if (type === "bud-web") {
+    if (cookies.bud_projectid) extraHeaders["X-Bud-ProjectId"] = cookies.bud_projectid;
+    if (cookies.bud_userid) extraHeaders["X-Bud-UserId"] = cookies.bud_userid;
+    if (cookies.bud_chatsessionid) extraHeaders["X-Bud-ChatSessionId"] = cookies.bud_chatsessionid;
+    if (cookies.bud_template) extraHeaders["X-Bud-Template"] = cookies.bud_template;
+  }
+  if (type === "devin-web") {
+    if (cookies.devin_orgid) extraHeaders["X-Devin-OrgId"] = cookies.devin_orgid;
+    if (cookies.devin_userid) extraHeaders["X-Devin-UserId"] = cookies.devin_userid;
+    if (cookies.devin_username) extraHeaders["X-Devin-Username"] = cookies.devin_username;
+  }
+  return extraHeaders;
+}
+
+function inferCookieAccountName(type: string, cookies: Record<string, string>): string | undefined {
+  if (type === "bud-web") {
+    const user = cookies.bud_userid;
+    const project = cookies.bud_projectid;
+    if (user && project) return `Bud ${user} ${project.slice(0, 8)}`;
+    if (user) return `Bud ${user}`;
+    if (project) return `Bud ${project.slice(0, 8)}`;
+  }
+  if (type === "devin-web") {
+    if (cookies.devin_username && cookies.devin_orgid) return `Devin ${cookies.devin_username} ${cookies.devin_orgid.slice(0, 12)}`;
+    if (cookies.devin_orgname) return `Devin ${cookies.devin_orgname}`;
+    if (cookies.devin_orgid) return `Devin ${cookies.devin_orgid.slice(0, 12)}`;
+  }
+  return undefined;
+}
+
+app.get("/ext/providers/:providerId/accounts", (req, res) => {
+  if (!extensionAuthorized(req, res)) return;
+  const rows = db.prepare(`
+    SELECT id, provider_id, name, auth_type, enabled, priority, requests_count, error_count, last_used_at, last_error_at, cooldown_until, created_at, updated_at
+    FROM provider_accounts
+    WHERE provider_id = ?
+    ORDER BY priority DESC, created_at ASC
+  `).all(req.params.providerId);
+  res.json(rows);
+});
+
+app.post("/ext/cookies/:providerId", (req, res) => {
+  if (!extensionAuthorized(req, res)) return;
+  const { cookies, account_id, account_name } = req.body as {
+    cookies: Record<string, string>;
+    account_id?: string;
+    account_name?: string;
+  };
+  if (!cookies) {
+    res.status(400).json({ error: "cookies required" });
+    return;
+  }
+
+  const p = db
+    .prepare("SELECT id, type, extra_headers FROM providers WHERE id = ?")
+    .get(req.params.providerId) as { id: string; type: string; extra_headers: string | null } | undefined;
+  if (!p) {
+    res.status(404).json({ error: "Provider not found" });
+    return;
+  }
+
+  const inferredName = account_name?.trim() || inferCookieAccountName(p.type, cookies);
+  const now = Date.now();
+  if (account_id || inferredName) {
+    const existing = account_id
+      ? db.prepare("SELECT * FROM provider_accounts WHERE id = ? AND provider_id = ?").get(account_id, p.id) as ProviderAccount | undefined
+      : undefined;
+    if (account_id && !existing) {
+      res.status(404).json({ error: "Account not found" });
+      return;
+    }
+
+    const extraHeaders = mergeWebCookieHeaders(p.type, cookies, parseRecord(existing?.extra_headers ?? p.extra_headers));
+    const id = existing?.id ?? randomUUID();
+    const name = existing?.name ?? inferredName ?? "Cookie Account";
+    db.prepare(`
+      INSERT INTO provider_accounts
+        (id, provider_id, name, auth_type, cookies, extra_headers, enabled, priority, created_at, updated_at)
+      VALUES (?, ?, ?, 'cookies', ?, ?, 1, 0, ?, ?)
+      ON CONFLICT(provider_id, name) DO UPDATE SET
+        auth_type = 'cookies',
+        cookies = excluded.cookies,
+        extra_headers = excluded.extra_headers,
+        enabled = 1,
+        updated_at = excluded.updated_at
+    `).run(
+      id,
+      p.id,
+      name,
+      JSON.stringify(cookies),
+      Object.keys(extraHeaders).length ? JSON.stringify(extraHeaders) : null,
+      now,
+      now,
+    );
+    db.prepare("UPDATE providers SET enabled = 1, updated_at = ? WHERE id = ?").run(now, p.id);
+    res.json({ ok: true, account: name });
+    return;
+  }
+
+  const extraHeaders = mergeWebCookieHeaders(p.type, cookies, parseRecord(p.extra_headers));
+  db.prepare(
+    "UPDATE providers SET cookies = ?, extra_headers = ?, updated_at = ? WHERE id = ?",
+  ).run(
+    JSON.stringify(cookies),
+    Object.keys(extraHeaders).length ? JSON.stringify(extraHeaders) : p.extra_headers,
+    now,
+    req.params.providerId,
+  );
+  res.json({ ok: true });
+});
 
 // Chrome extension CORS-free cookie push endpoint
 app.post("/ext/cookies/:providerId", (req, res) => {

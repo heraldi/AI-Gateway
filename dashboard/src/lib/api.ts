@@ -28,10 +28,31 @@ export type Provider = {
   id: string; name: string; type: string;
   base_url: string | null; api_key: string | null;
   auth_type?: 'oauth' | 'cookies' | 'key' | null;
+  account_count?: number;
+  enabled_account_count?: number;
   extra_headers?: string | null;
   cookies: string | null; enabled: number;
   priority: number; notes: string | null;
   created_at: number; updated_at: number;
+};
+
+export type ProviderAccount = {
+  id: string;
+  provider_id: string;
+  name: string;
+  auth_type: string | null;
+  api_key: string | null;
+  cookies: string | null;
+  extra_headers: string | null;
+  enabled: number;
+  priority: number;
+  requests_count: number;
+  error_count: number;
+  last_used_at: number | null;
+  last_error_at: number | null;
+  cooldown_until: number | null;
+  created_at: number;
+  updated_at: number;
 };
 
 export type ModelRoute = {
@@ -137,6 +158,12 @@ type ProviderPayload = Omit<Partial<Provider>, 'cookies' | 'extra_headers'> & {
   extra_headers?: object;
 };
 
+type ProviderAccountPayload = Omit<Partial<ProviderAccount>, 'cookies' | 'extra_headers' | 'enabled'> & {
+  cookies?: object | null;
+  extra_headers?: object | null;
+  enabled?: boolean;
+};
+
 export const api = {
   stats: () => get<Stats>('/stats'),
   providers: {
@@ -149,6 +176,15 @@ export const api = {
     delete: (id: string) => del<{ ok: boolean }>(`/providers/${id}`),
     updateCookies: (id: string, cookies: Record<string, string>) =>
       post<{ ok: boolean }>(`/providers/${id}/cookies`, { cookies }),
+    accounts: {
+      list: (providerId: string) => get<ProviderAccount[]>(`/providers/${providerId}/accounts`),
+      create: (providerId: string, data: ProviderAccountPayload) =>
+        post<{ id: string }>(`/providers/${providerId}/accounts`, data),
+      update: (providerId: string, accountId: string, data: ProviderAccountPayload) =>
+        put<{ ok: boolean }>(`/providers/${providerId}/accounts/${accountId}`, data),
+      delete: (providerId: string, accountId: string) =>
+        del<{ ok: boolean }>(`/providers/${providerId}/accounts/${accountId}`),
+    },
   },
   routes: {
     list: () => get<ModelRoute[]>('/model-routes'),
@@ -191,7 +227,8 @@ export const api = {
     test: (data: { model: string; prompt?: string; provider_id?: string }) => post<ModelTestResult>('/models/test', data),
   },
   oauth: {
-    start: (provider: OAuthProvider) => post<OAuthStartResult>(`/oauth/${provider}/start`, {}),
+    start: (provider: OAuthProvider, targetProviderId?: string) =>
+      post<OAuthStartResult>(`/oauth/${provider}/start`, targetProviderId ? { target_provider_id: targetProviderId } : {}),
     status: (provider: OAuthProvider, state: string) => get<OAuthStatusResult>(`/oauth/${provider}/status/${encodeURIComponent(state)}`),
   },
 };

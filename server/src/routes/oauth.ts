@@ -9,7 +9,7 @@ type OAuthProvider =
   | 'gemini-cli' | 'antigravity' | 'codex' | 'kiro' | 'cursor' | 'gitlab';
 
 type OAuthStatus =
-  | { status: 'pending'; provider: OAuthProvider; createdAt: number; deviceCode?: string; codeVerifier?: string; intervalMs?: number; lastPollAt?: number; userCode?: string; verificationUri?: string; authUrl?: string; redirectUri?: string }
+  | { status: 'pending'; provider: OAuthProvider; createdAt: number; targetProviderId?: string; deviceCode?: string; codeVerifier?: string; intervalMs?: number; lastPollAt?: number; userCode?: string; verificationUri?: string; authUrl?: string; redirectUri?: string }
   | { status: 'complete'; provider: OAuthProvider; createdAt: number; providerId: string; email?: string }
   | { status: 'error'; provider: OAuthProvider; createdAt: number; error: string };
 
@@ -446,20 +446,33 @@ function decodeJwtPayload(jwt: string): Record<string, unknown> | undefined {
   }
 }
 
-function upsertIflowProvider(apiKey: string, email?: string): string {
+function upsertIflowProvider(apiKey: string, email?: string, targetProviderId?: string): string {
   const account = email ?? `iflow-${apiKey.slice(0, 12)}`;
-  const match = providerAccountMatch('iflow', account);
-  const existing = db.prepare(`SELECT id FROM providers WHERE ${match.clause} ORDER BY created_at ASC LIMIT 1`)
-    .get(...match.params) as { id: string } | undefined;
   const now = Date.now();
   const name = providerStoredName('iflow', account);
   const notes = `Connected via iFlow OAuth (${account})`;
-  const extraHeaders = JSON.stringify({ 'User-Agent': 'iFlow-Cli' });
-  const cookies = JSON.stringify({
+  const extraHeadersObject = { 'User-Agent': 'iFlow-Cli' };
+  const cookiesObject = {
     oauth_provider: 'iflow',
     oauth_account: account,
     connected_at: new Date(now).toISOString(),
-  });
+  };
+  if (upsertOAuthAccount({
+    targetProviderId,
+    provider: 'iflow',
+    account,
+    accessToken: apiKey,
+    extraHeaders: extraHeadersObject,
+    cookies: cookiesObject,
+  })) {
+    return targetProviderId!;
+  }
+
+  const match = providerAccountMatch('iflow', account);
+  const existing = db.prepare(`SELECT id FROM providers WHERE ${match.clause} ORDER BY created_at ASC LIMIT 1`)
+    .get(...match.params) as { id: string } | undefined;
+  const extraHeaders = JSON.stringify(extraHeadersObject);
+  const cookies = JSON.stringify(cookiesObject);
 
   if (existing) {
     db.prepare(`
@@ -503,23 +516,37 @@ function qwenHeaders(): Record<string, string> {
   };
 }
 
-function upsertQwenProvider(accessToken: string, refreshToken?: string, resourceUrl?: string): string {
+function upsertQwenProvider(accessToken: string, refreshToken?: string, resourceUrl?: string, targetProviderId?: string): string {
   const baseUrl = qwenBaseUrl(resourceUrl);
   const now = Date.now();
   const account = `qwen-${resourceUrl ?? refreshToken?.slice(0, 12) ?? accessToken.slice(0, 12)}`;
-  const match = providerAccountMatch('qwen', account);
-  const existing = db.prepare(`SELECT id FROM providers WHERE ${match.clause} ORDER BY created_at ASC LIMIT 1`)
-    .get(...match.params) as { id: string } | undefined;
   const name = providerStoredName('qwen', account);
   const notes = 'Connected via Qwen device-code OAuth';
-  const cookies = JSON.stringify({
+  const cookiesObject = {
     oauth_provider: 'qwen',
     oauth_account: account,
     qwen_refresh_token: refreshToken,
     qwen_resource_url: resourceUrl,
     qwen_connected_at: new Date(now).toISOString(),
-  });
-  const extraHeaders = JSON.stringify(qwenHeaders());
+  };
+  const extraHeadersObject = qwenHeaders();
+  if (upsertOAuthAccount({
+    targetProviderId,
+    provider: 'qwen',
+    account,
+    accessToken,
+    refreshToken,
+    extraHeaders: extraHeadersObject,
+    cookies: cookiesObject,
+  })) {
+    return targetProviderId!;
+  }
+
+  const match = providerAccountMatch('qwen', account);
+  const existing = db.prepare(`SELECT id FROM providers WHERE ${match.clause} ORDER BY created_at ASC LIMIT 1`)
+    .get(...match.params) as { id: string } | undefined;
+  const cookies = JSON.stringify(cookiesObject);
+  const extraHeaders = JSON.stringify(extraHeadersObject);
 
   if (existing) {
     db.prepare(`
@@ -571,7 +598,52 @@ function providerStoredName(provider: OAuthProvider, account?: string): string {
   return `${providerDisplayName(provider)} (${compact})`;
 }
 
+function targetProviderIdFromRequest(req: Request): string | undefined {
+  const value = (req.body as { target_provider_id?: unknown } | undefined)?.target_provider_id;
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function upsertOAuthAccount(options: {
+  targetProviderId?: string;
+  provider: OAuthProvider;
+  account: string;
+  accessToken: string;
+  refreshToken?: string;
+  extraHeaders?: Record<string, string>;
+  cookies?: Record<string, unknown>;
+}): boolean {
+  if (!options.targetProviderId) return false;
+  const target = db.prepare('SELECT id FROM providers WHERE id = ?').get(options.targetProviderId) as { id: string } | undefined;
+  if (!target) throw new Error('Target provider not found for OAuth account.');
+
+  const now = Date.now();
+  const cookies = JSON.stringify({
+    ...(options.cookies ?? {}),
+    oauth_provider: options.provider,
+    oauth_account: options.account,
+    refresh_token: options.refreshToken,
+    connected_at: new Date(now).toISOString(),
+  });
+  const extraHeaders = JSON.stringify(options.extraHeaders ?? {});
+  const id = uuid();
+  db.prepare(`
+    INSERT INTO provider_accounts
+      (id, provider_id, name, auth_type, api_key, cookies, extra_headers, enabled, priority, created_at, updated_at)
+    VALUES (?, ?, ?, 'oauth', ?, ?, ?, 1, 0, ?, ?)
+    ON CONFLICT(provider_id, name) DO UPDATE SET
+      auth_type = 'oauth',
+      api_key = excluded.api_key,
+      cookies = excluded.cookies,
+      extra_headers = excluded.extra_headers,
+      enabled = 1,
+      updated_at = excluded.updated_at
+  `).run(id, options.targetProviderId, options.account, options.accessToken, cookies, extraHeaders, now, now);
+  db.prepare('UPDATE providers SET enabled = 1, updated_at = ? WHERE id = ?').run(now, options.targetProviderId);
+  return true;
+}
+
 function upsertBearerProvider(options: {
+  targetProviderId?: string;
   provider: OAuthProvider;
   type: string;
   baseUrl: string;
@@ -583,6 +655,18 @@ function upsertBearerProvider(options: {
   cookies?: Record<string, unknown>;
 }): string {
   const account = options.email ?? options.cookies?.oauth_account ?? `${options.provider}-${options.accessToken.slice(0, 12)}`;
+  const accountName = typeof account === 'string' ? account : `${options.provider}-${options.accessToken.slice(0, 12)}`;
+  if (upsertOAuthAccount({
+    targetProviderId: options.targetProviderId,
+    provider: options.provider,
+    account: accountName,
+    accessToken: options.accessToken,
+    refreshToken: options.refreshToken,
+    extraHeaders: options.extraHeaders,
+    cookies: options.cookies,
+  })) {
+    return options.targetProviderId!;
+  }
   const match = providerAccountMatch(options.provider, typeof account === 'string' ? account : undefined);
   const existing = db.prepare(`SELECT id FROM providers WHERE ${match.clause} ORDER BY created_at ASC LIMIT 1`)
     .get(...match.params) as { id: string } | undefined;
@@ -813,6 +897,7 @@ async function pollQwenToken(session: Extract<OAuthStatus, { status: 'pending' }
       json.access_token,
       typeof json.refresh_token === 'string' ? json.refresh_token : undefined,
       typeof json.resource_url === 'string' ? json.resource_url : undefined,
+      session.targetProviderId,
     );
     return { status: 'complete', provider: 'qwen', createdAt: session.createdAt, providerId };
   }
@@ -875,6 +960,7 @@ async function pollGenericDeviceProvider(session: Extract<OAuthStatus, { status:
     const user = userRes.ok ? await readJson(userRes) : {};
     const login = typeof user.login === 'string' ? user.login : undefined;
     const providerId = upsertBearerProvider({
+      targetProviderId: session.targetProviderId,
       provider: 'github',
       type: 'openai-compatible',
       baseUrl: 'https://api.githubcopilot.com/chat/completions',
@@ -921,6 +1007,7 @@ async function pollGenericDeviceProvider(session: Extract<OAuthStatus, { status:
     }
     const kimiRefreshToken = typeof json.refresh_token === 'string' ? json.refresh_token : undefined;
     const providerId = upsertBearerProvider({
+      targetProviderId: session.targetProviderId,
       provider: 'kimi-coding',
       type: 'anthropic-compatible',
       baseUrl: 'https://api.kimi.com/coding',
@@ -953,6 +1040,7 @@ async function pollGenericDeviceProvider(session: Extract<OAuthStatus, { status:
 
     const email = typeof json.userEmail === 'string' ? json.userEmail : undefined;
     const providerId = upsertBearerProvider({
+      targetProviderId: session.targetProviderId,
       provider: 'kilocode',
       type: 'openai-compatible',
       baseUrl: 'https://api.kilo.ai/api/openrouter/chat/completions',
@@ -987,6 +1075,7 @@ async function pollGenericDeviceProvider(session: Extract<OAuthStatus, { status:
     if (json.code !== 0 || typeof data.accessToken !== 'string') throw new Error(`CodeBuddy authorization failed: ${JSON.stringify(json)}`);
     const codebuddyRefreshToken = typeof data.refreshToken === 'string' ? data.refreshToken : undefined;
     const providerId = upsertBearerProvider({
+      targetProviderId: session.targetProviderId,
       provider: 'codebuddy',
       type: 'openai-compatible',
       baseUrl: 'https://copilot.tencent.com/v1',
@@ -1023,6 +1112,7 @@ async function pollGenericDeviceProvider(session: Extract<OAuthStatus, { status:
     }
     const account = `kiro-${String(json.refreshToken ?? json.accessToken).slice(0, 12)}`;
     const providerId = upsertBearerProvider({
+      targetProviderId: session.targetProviderId,
       provider: 'kiro',
       type: 'kiro',
       baseUrl: 'https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse',
@@ -1046,7 +1136,8 @@ async function pollGenericDeviceProvider(session: Extract<OAuthStatus, { status:
 oauthAdminRouter.post('/iflow/start', (req, res) => {
   const state = randomBytes(24).toString('base64url');
   const redirectUri = localCallbackUri(req);
-  oauthSessions.set(state, { status: 'pending', provider: 'iflow', createdAt: Date.now(), redirectUri });
+  const targetProviderId = targetProviderIdFromRequest(req);
+  oauthSessions.set(state, { status: 'pending', provider: 'iflow', createdAt: Date.now(), targetProviderId, redirectUri });
   res.json({
     state,
     authUrl: buildIflowAuthUrl(redirectUri, state),
@@ -1062,14 +1153,16 @@ oauthAdminRouter.get('/iflow/status/:state', (req, res) => {
   res.json(status);
 });
 
-oauthAdminRouter.post('/qwen/start', async (_req, res) => {
+oauthAdminRouter.post('/qwen/start', async (req, res) => {
   const state = randomBytes(24).toString('base64url');
+  const targetProviderId = targetProviderIdFromRequest(req);
   try {
     const device = await startQwenDeviceFlow();
     oauthSessions.set(state, {
       status: 'pending',
       provider: 'qwen',
       createdAt: Date.now(),
+      targetProviderId,
       deviceCode: device.deviceCode,
       codeVerifier: device.codeVerifier,
       intervalMs: device.intervalMs,
@@ -1128,6 +1221,7 @@ oauthAdminRouter.post('/:provider/start', async (req, res) => {
   }
 
   const state = randomBytes(24).toString('base64url');
+  const targetProviderId = targetProviderIdFromRequest(req);
   try {
     if (provider === 'claude') {
       const { verifier, challenge } = pkcePair();
@@ -1137,6 +1231,7 @@ oauthAdminRouter.post('/:provider/start', async (req, res) => {
         status: 'pending',
         provider,
         createdAt: Date.now(),
+        targetProviderId,
         codeVerifier: verifier,
         intervalMs: 5000,
         lastPollAt: 0,
@@ -1154,6 +1249,7 @@ oauthAdminRouter.post('/:provider/start', async (req, res) => {
         status: 'pending',
         provider,
         createdAt: Date.now(),
+        targetProviderId,
         intervalMs: 5000,
         lastPollAt: 0,
         authUrl,
@@ -1166,7 +1262,7 @@ oauthAdminRouter.post('/:provider/start', async (req, res) => {
     if (provider === 'gemini-cli' || provider === 'antigravity') {
       const redirectUri = localCallbackUri(req);
       const authUrl = buildGoogleAuthUrl(provider, redirectUri, state);
-      oauthSessions.set(state, { status: 'pending', provider, createdAt: Date.now(), intervalMs: 5000, lastPollAt: 0, authUrl, redirectUri });
+      oauthSessions.set(state, { status: 'pending', provider, createdAt: Date.now(), targetProviderId, intervalMs: 5000, lastPollAt: 0, authUrl, redirectUri });
       res.json({ state, authUrl });
       return;
     }
@@ -1176,7 +1272,7 @@ oauthAdminRouter.post('/:provider/start', async (req, res) => {
       await startCodexProxy(localAppPort(req));
       const redirectUri = 'http://localhost:1455/auth/callback';
       const authUrl = buildCodexAuthUrl(redirectUri, state, challenge);
-      oauthSessions.set(state, { status: 'pending', provider, createdAt: Date.now(), codeVerifier: verifier, intervalMs: 5000, lastPollAt: 0, authUrl, redirectUri });
+      oauthSessions.set(state, { status: 'pending', provider, createdAt: Date.now(), targetProviderId, codeVerifier: verifier, intervalMs: 5000, lastPollAt: 0, authUrl, redirectUri });
       res.json({ state, authUrl });
       return;
     }
@@ -1185,7 +1281,7 @@ oauthAdminRouter.post('/:provider/start', async (req, res) => {
       const { verifier, challenge } = pkcePair();
       const redirectUri = localCallbackUri(req);
       const authUrl = buildGitlabAuthUrl(redirectUri, state, challenge);
-      oauthSessions.set(state, { status: 'pending', provider, createdAt: Date.now(), codeVerifier: verifier, intervalMs: 5000, lastPollAt: 0, authUrl, redirectUri });
+      oauthSessions.set(state, { status: 'pending', provider, createdAt: Date.now(), targetProviderId, codeVerifier: verifier, intervalMs: 5000, lastPollAt: 0, authUrl, redirectUri });
       res.json({ state, authUrl });
       return;
     }
@@ -1195,6 +1291,7 @@ oauthAdminRouter.post('/:provider/start', async (req, res) => {
       status: 'pending',
       provider,
       createdAt: Date.now(),
+      targetProviderId,
       deviceCode: device.deviceCode,
       codeVerifier: device.codeVerifier,
       intervalMs: device.intervalMs,
@@ -1276,7 +1373,7 @@ async function handleIflowCallback(req: Request, res: ExpressResponse): Promise<
     const redirectUri = session.redirectUri ?? localCallbackUri(req);
     const tokens = await exchangeIflowCode(code, redirectUri);
     const user = await getIflowUserInfo(tokens.accessToken);
-    const providerId = upsertIflowProvider(user.apiKey, user.email);
+    const providerId = upsertIflowProvider(user.apiKey, user.email, session.targetProviderId);
     oauthSessions.set(state, { status: 'complete', provider: 'iflow', createdAt, providerId, email: user.email });
 
     res.type('html').send('<!doctype html><html><body><script>window.close()</script><p>iFlow connected. You can close this tab.</p></body></html>');
@@ -1306,6 +1403,7 @@ async function handleClaudeCallback(req: Request, res: ExpressResponse): Promise
     const tokens = await exchangeClaudeCode(code, redirectUri, session.codeVerifier, state);
     const account = tokens.refreshToken ? `claude-${tokens.refreshToken.slice(0, 12)}` : `claude-${tokens.accessToken.slice(0, 12)}`;
     const providerId = upsertBearerProvider({
+      targetProviderId: session.targetProviderId,
       provider: 'claude',
       type: 'anthropic-compatible',
       baseUrl: 'https://api.anthropic.com',
@@ -1346,6 +1444,7 @@ async function handleClineCallback(req: Request, res: ExpressResponse): Promise<
     const tokens = await exchangeClineCode(code, redirectUri);
     const account = tokens.email ?? (tokens.refreshToken ? `cline-${tokens.refreshToken.slice(0, 12)}` : `cline-${tokens.accessToken.slice(0, 12)}`);
     const providerId = upsertBearerProvider({
+      targetProviderId: session.targetProviderId,
       provider: 'cline',
       type: 'openai-compatible',
       baseUrl: 'https://api.cline.bot/api/v1',
@@ -1386,6 +1485,7 @@ async function handleGoogleCallback(provider: 'gemini-cli' | 'antigravity', req:
     const tokens = await exchangeGoogleCode(provider, code, redirectUri);
     const account = tokens.email ?? `${provider}-${String(tokens.refreshToken ?? tokens.accessToken).slice(0, 12)}`;
     const providerId = upsertBearerProvider({
+      targetProviderId: session.targetProviderId,
       provider,
       type: provider,
       baseUrl: provider === 'antigravity' ? 'https://daily-cloudcode-pa.googleapis.com' : 'https://cloudcode-pa.googleapis.com/v1internal',
@@ -1422,6 +1522,7 @@ async function handleCodexCallback(req: Request, res: ExpressResponse): Promise<
     const tokens = await exchangeCodexCode(code, redirectUri, session.codeVerifier);
     const account = tokens.email ?? `codex-${String(tokens.refreshToken ?? tokens.accessToken).slice(0, 12)}`;
     const providerId = upsertBearerProvider({
+      targetProviderId: session.targetProviderId,
       provider: 'codex',
       type: 'codex',
       baseUrl: 'https://chatgpt.com/backend-api/codex/responses',
@@ -1457,6 +1558,7 @@ async function handleGitlabCallback(req: Request, res: ExpressResponse): Promise
     const tokens = await exchangeGitlabCode(code, redirectUri, session.codeVerifier);
     const account = tokens.email ?? `gitlab-${String(tokens.refreshToken ?? tokens.accessToken).slice(0, 12)}`;
     const providerId = upsertBearerProvider({
+      targetProviderId: session.targetProviderId,
       provider: 'gitlab',
       type: 'gitlab',
       baseUrl: `${GITLAB_BASE_URL.replace(/\/$/, '')}/api/v4/chat/completions`,

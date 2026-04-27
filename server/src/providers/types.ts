@@ -20,6 +20,8 @@ export interface ProviderConfig {
   id: string;
   name: string;
   type: ProviderType;
+  accountId?: string;
+  accountName?: string;
   baseUrl?: string;
   apiKey?: string;
   cookies?: Record<string, string>;

@@ -1,5 +1,5 @@
 import { db, getSetting, setSetting } from '../db/index.js';
-import type { Provider, ModelAlias } from '../db/index.js';
+import type { Provider, ModelAlias, ProviderAccount } from '../db/index.js';
 import type { ProviderAdapter, ProviderConfig, ProviderType, NormalizedRequest, ModelInfo } from './types.js';
 import { AnthropicAdapter } from './adapters/anthropic.js';
 import { OpenAIAdapter, OpenAICompatibleAdapter } from './adapters/openai.js';
@@ -63,20 +63,71 @@ function pickRoundRobin<T extends { id: string }>(items: T[], key: string): T | 
   return items[index];
 }
 
+function parseJsonObject(value: string | null | undefined): Record<string, string> | undefined {
+  if (!value) return undefined;
+  try {
+    return JSON.parse(value) as Record<string, string>;
+  } catch {
+    return undefined;
+  }
+}
+
+function pickProviderAccount(provider: Provider): ProviderAccount | undefined {
+  const now = Date.now();
+  const total = (db.prepare('SELECT COUNT(*) as c FROM provider_accounts WHERE provider_id = ?')
+    .get(provider.id) as { c: number }).c;
+  if (total === 0) return undefined;
+  const accounts = db.prepare(`
+    SELECT * FROM provider_accounts
+    WHERE provider_id = ?
+      AND enabled = 1
+      AND (cooldown_until IS NULL OR cooldown_until <= ?)
+    ORDER BY priority DESC, created_at ASC
+  `).all(provider.id, now) as ProviderAccount[];
+  const selected = pickRoundRobin(accounts, `account:${provider.id}:${accounts.map(a => a.id).join(',')}`);
+  if (selected) {
+    db.prepare('UPDATE provider_accounts SET requests_count = requests_count + 1, last_used_at = ? WHERE id = ?')
+      .run(now, selected.id);
+  }
+  return selected ?? {
+    id: '',
+    provider_id: provider.id,
+    name: 'No active account',
+    auth_type: 'none',
+    api_key: null,
+    cookies: null,
+    extra_headers: null,
+    enabled: 0,
+    priority: 0,
+    requests_count: 0,
+    error_count: 0,
+    last_used_at: null,
+    last_error_at: null,
+    cooldown_until: null,
+    created_at: 0,
+    updated_at: 0,
+  };
+}
+
 export function getAdapter(type: ProviderType): ProviderAdapter {
   return ADAPTERS[type] ?? OpenAICompatibleAdapter;
 }
 
 export function dbProviderToConfig(p: Provider): ProviderConfig {
   const type = effectiveProviderType(p);
+  const account = pickProviderAccount(p);
+  const providerHeaders = parseJsonObject(p.extra_headers) ?? {};
+  const accountHeaders = parseJsonObject(account?.extra_headers) ?? {};
   return {
     id: p.id,
     name: p.name,
     type,
+    accountId: account?.id,
+    accountName: account?.name,
     baseUrl: p.base_url ?? DEFAULT_BASE_URLS[type],
-    apiKey: p.api_key ?? undefined,
-    cookies: p.cookies ? JSON.parse(p.cookies) : undefined,
-    extraHeaders: p.extra_headers ? JSON.parse(p.extra_headers) : undefined,
+    apiKey: account?.api_key ?? p.api_key ?? undefined,
+    cookies: parseJsonObject(account?.cookies ?? p.cookies),
+    extraHeaders: Object.keys({ ...providerHeaders, ...accountHeaders }).length ? { ...providerHeaders, ...accountHeaders } : undefined,
   };
 }
 

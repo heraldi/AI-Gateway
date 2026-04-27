@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Edit2, ToggleLeft, ToggleRight, Upload, RefreshCw, KeyRound, LogIn, Cookie, HardDrive } from 'lucide-react';
-import { api, type Provider } from '../lib/api';
+import { Plus, Trash2, Edit2, ToggleLeft, ToggleRight, Upload, RefreshCw, KeyRound, LogIn, Cookie, HardDrive, Users } from 'lucide-react';
+import { api, type OAuthProvider, type Provider, type ProviderAccount } from '../lib/api';
 import { PROVIDER_PRESETS, type ProviderPreset } from '../lib/providerPresets';
 
 // ── Type display ──────────────────────────────────────────────────────────────
@@ -59,6 +59,13 @@ type FormData = {
 
 type ProviderFlow = 'api-key' | 'oauth' | 'web-cookie' | 'local';
 
+type AccountFormData = {
+  name: string;
+  api_key: string;
+  cookies_json: string;
+  priority: string;
+};
+
 const FLOW_META: Record<ProviderFlow, { label: string; hint: string; icon: typeof KeyRound }> = {
   'api-key': { label: 'API Key', hint: 'Standard API providers', icon: KeyRound },
   oauth: { label: 'OAuth Login', hint: 'Browser or device-code login', icon: LogIn },
@@ -82,6 +89,13 @@ const emptyForm = (): FormData => ({
   devin_username: '',
 });
 
+const emptyAccountForm = (): AccountFormData => ({
+  name: '',
+  api_key: '',
+  cookies_json: '',
+  priority: '0',
+});
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function ProvidersPage() {
@@ -96,9 +110,29 @@ export default function ProvidersPage() {
   const [cookieProviderId, setCookieProviderId] = useState('');
   const [cookieJson, setCookieJson]     = useState('');
   const [cookieMsg, setCookieMsg]       = useState('');
+  const [expandedProviderId, setExpandedProviderId] = useState('');
+  const [accountsByProvider, setAccountsByProvider] = useState<Record<string, ProviderAccount[]>>({});
+  const [accountForms, setAccountForms] = useState<Record<string, AccountFormData>>({});
+  const [accountOAuthPresetByProvider, setAccountOAuthPresetByProvider] = useState<Record<string, string>>({});
+  const [accountOAuthMsg, setAccountOAuthMsg] = useState<Record<string, string>>({});
+  const [accountOAuthLoading, setAccountOAuthLoading] = useState<Record<string, boolean>>({});
 
   const load = () => api.providers.list().then(setProviders).catch(console.error);
   useEffect(() => { load(); }, []);
+
+  async function loadAccounts(providerId: string) {
+    const rows = await api.providers.accounts.list(providerId);
+    setAccountsByProvider(prev => ({ ...prev, [providerId]: rows }));
+  }
+
+  async function toggleAccounts(providerId: string) {
+    const next = expandedProviderId === providerId ? '' : providerId;
+    setExpandedProviderId(next);
+    if (next) {
+      setAccountForms(prev => ({ ...prev, [providerId]: prev[providerId] ?? emptyAccountForm() }));
+      await loadAccounts(providerId);
+    }
+  }
 
   const detectedType = form.provider_type || detectType(form.base_url);
   const isCookieBased = detectedType === 'claude-web' || detectedType === 'chatgpt-web' || detectedType === 'bud-web' || detectedType === 'devin-web' || detectedType === 'perplexity-web';
@@ -137,6 +171,13 @@ export default function ProvidersPage() {
       case 'cline': return 'Cline';
       case 'gitlab': return 'GitLab Duo';
     }
+  }
+
+  function oauthPresetsForProvider(provider: Provider): ProviderPreset[] {
+    const baseUrl = (provider.base_url ?? '').replace(/\/$/, '');
+    return PROVIDER_PRESETS.filter(preset =>
+      preset.oauth && preset.base_url.replace(/\/$/, '') === baseUrl
+    );
   }
 
   async function connectOAuth() {
@@ -178,6 +219,50 @@ export default function ProvidersPage() {
     } catch (e) {
       setOauthMsg(`OAuth error: ${e instanceof Error ? e.message : String(e)}`);
       setLoading(false);
+    }
+  }
+
+  async function connectOAuthAccount(provider: Provider) {
+    const presets = oauthPresetsForProvider(provider);
+    const presetId = accountOAuthPresetByProvider[provider.id] || presets[0]?.id;
+    const oauthProvider = PROVIDER_PRESETS.find(p => p.id === presetId)?.oauth;
+    if (!oauthProvider) return;
+    const label = oauthLabel(oauthProvider);
+    setAccountOAuthLoading(prev => ({ ...prev, [provider.id]: true }));
+    setAccountOAuthMsg(prev => ({ ...prev, [provider.id]: `Opening ${label} login...` }));
+    try {
+      const started = await api.oauth.start(oauthProvider, provider.id);
+      const popup = window.open(started.authUrl, `ai-gateway-${oauthProvider}-account-oauth`, 'width=520,height=760');
+      if (!popup) {
+        setAccountOAuthMsg(prev => ({ ...prev, [provider.id]: 'Popup blocked. Allow popups and try again.' }));
+        setAccountOAuthLoading(prev => ({ ...prev, [provider.id]: false }));
+        return;
+      }
+
+      setAccountOAuthMsg(prev => ({
+        ...prev,
+        [provider.id]: started.userCode
+          ? `Enter code ${started.userCode} in the opened ${label} page.`
+          : `Waiting for ${label} authorization...`,
+      }));
+      const deadline = Date.now() + 5 * 60_000;
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        const status = await api.oauth.status(oauthProvider, started.state);
+        if (status.status === 'complete') {
+          setAccountOAuthMsg(prev => ({ ...prev, [provider.id]: `Account connected${status.email ? `: ${status.email}` : ''}` }));
+          await loadAccounts(provider.id);
+          load();
+          setTimeout(() => setAccountOAuthMsg(prev => ({ ...prev, [provider.id]: '' })), 3000);
+          setAccountOAuthLoading(prev => ({ ...prev, [provider.id]: false }));
+          return;
+        }
+        if (status.status === 'error') throw new Error(status.error);
+      }
+      throw new Error('OAuth timeout.');
+    } catch (e) {
+      setAccountOAuthMsg(prev => ({ ...prev, [provider.id]: `OAuth error: ${e instanceof Error ? e.message : String(e)}` }));
+      setAccountOAuthLoading(prev => ({ ...prev, [provider.id]: false }));
     }
   }
 
@@ -226,6 +311,42 @@ export default function ProvidersPage() {
   async function remove(id: string) {
     if (!confirm('Delete this provider?')) return;
     await api.providers.delete(id); load();
+  }
+
+  async function addAccount(providerId: string) {
+    const form = accountForms[providerId] ?? emptyAccountForm();
+    let cookies: object | undefined;
+    if (form.cookies_json.trim()) {
+      try {
+        cookies = JSON.parse(form.cookies_json);
+      } catch {
+        alert('Cookies must be valid JSON.');
+        return;
+      }
+    }
+    await api.providers.accounts.create(providerId, {
+      name: form.name || 'Account',
+      api_key: form.api_key || undefined,
+      cookies,
+      priority: Number.parseInt(form.priority, 10) || 0,
+      enabled: true,
+    });
+    setAccountForms(prev => ({ ...prev, [providerId]: emptyAccountForm() }));
+    await loadAccounts(providerId);
+    load();
+  }
+
+  async function toggleAccount(providerId: string, account: ProviderAccount) {
+    await api.providers.accounts.update(providerId, account.id, { enabled: !account.enabled });
+    await loadAccounts(providerId);
+    load();
+  }
+
+  async function deleteAccount(providerId: string, accountId: string) {
+    if (!confirm('Delete this account?')) return;
+    await api.providers.accounts.delete(providerId, accountId);
+    await loadAccounts(providerId);
+    load();
   }
 
   function startEdit(p: Provider) {
@@ -297,34 +418,131 @@ export default function ProvidersPage() {
         )}
         {providers.map(p => {
           const meta = TYPE_META[p.type] ?? { label: p.type, color: 'badge-gray' };
+          const accounts = accountsByProvider[p.id] ?? [];
+          const accountForm = accountForms[p.id] ?? emptyAccountForm();
+          const expanded = expandedProviderId === p.id;
+          const oauthAccountPresets = oauthPresetsForProvider(p);
+          const selectedAccountOAuthPreset = accountOAuthPresetByProvider[p.id] || oauthAccountPresets[0]?.id || '';
           return (
-            <div key={p.id} className={`card flex items-center gap-3 ${!p.enabled ? 'opacity-50' : ''}`}>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-sm font-medium text-gray-100">{p.name}</span>
-                  <span className={meta.color}>{meta.label}</span>
-                  {(p.auth_type === 'oauth' || p.notes?.toLowerCase().includes('oauth')) && <span className="badge-blue">OAuth</span>}
-                  {p.auth_type === 'cookies' && !p.notes?.toLowerCase().includes('oauth') && <span className="badge-yellow">Cookies</span>}
-                  {p.api_key && p.auth_type !== 'oauth' && <span className="badge-gray">Key</span>}
+            <div key={p.id} className={`card space-y-3 ${!p.enabled ? 'opacity-50' : ''}`}>
+              <div className="flex items-center gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-medium text-gray-100">{p.name}</span>
+                    <span className={meta.color}>{meta.label}</span>
+                    {(p.auth_type === 'oauth' || p.notes?.toLowerCase().includes('oauth')) && <span className="badge-blue">OAuth</span>}
+                    {p.auth_type === 'cookies' && !p.notes?.toLowerCase().includes('oauth') && <span className="badge-yellow">Cookies</span>}
+                    {p.api_key && p.auth_type !== 'oauth' && <span className="badge-gray">Key</span>}
+                    <span className="badge-gray">{p.enabled_account_count ?? 0}/{p.account_count ?? 0} accounts</span>
+                  </div>
+                  {p.base_url && (
+                    <p className="text-xs text-muted mt-0.5 font-mono truncate">{p.base_url}</p>
+                  )}
+                  {p.notes && <p className="text-xs text-muted mt-0.5">{p.notes}</p>}
                 </div>
-                {p.base_url && (
-                  <p className="text-xs text-muted mt-0.5 font-mono truncate">{p.base_url}</p>
-                )}
-                {p.notes && <p className="text-xs text-muted mt-0.5">{p.notes}</p>}
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <button className="btn-ghost p-1.5" title="Accounts" onClick={() => toggleAccounts(p.id)}>
+                    <Users size={14} className={expanded ? 'text-accent' : ''} />
+                  </button>
+                  <button className="btn-ghost p-1.5" onClick={() => toggle(p)}>
+                    {p.enabled
+                      ? <ToggleRight size={18} className="text-success" />
+                      : <ToggleLeft  size={18} />}
+                  </button>
+                  <button className="btn-ghost p-1.5" onClick={() => startEdit(p)}>
+                    <Edit2 size={14} />
+                  </button>
+                  <button className="btn-danger p-1.5" onClick={() => remove(p.id)}>
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-1 flex-shrink-0">
-                <button className="btn-ghost p-1.5" onClick={() => toggle(p)}>
-                  {p.enabled
-                    ? <ToggleRight size={18} className="text-success" />
-                    : <ToggleLeft  size={18} />}
-                </button>
-                <button className="btn-ghost p-1.5" onClick={() => startEdit(p)}>
-                  <Edit2 size={14} />
-                </button>
-                <button className="btn-danger p-1.5" onClick={() => remove(p.id)}>
-                  <Trash2 size={14} />
-                </button>
-              </div>
+              {expanded && (
+                <div className="border-t border-border pt-3 space-y-3">
+                  <div className="space-y-1.5">
+                    {accounts.length === 0 && <p className="text-xs text-muted">No accounts configured.</p>}
+                    {accounts.map(account => (
+                      <div key={account.id} className="bg-base-700 rounded px-3 py-2 flex items-center gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs font-medium text-gray-200">{account.name}</span>
+                            <span className={account.auth_type === 'oauth' ? 'badge-blue' : account.auth_type === 'cookies' ? 'badge-yellow' : 'badge-gray'}>
+                              {account.auth_type ?? 'key'}
+                            </span>
+                            {account.enabled ? <span className="badge-green">Active</span> : <span className="badge-gray">Disabled</span>}
+                          </div>
+                          <p className="text-[11px] text-muted font-mono truncate">
+                            {account.api_key ? account.api_key : account.cookies ? 'cookies configured' : 'no credential'} · {account.requests_count} requests
+                          </p>
+                        </div>
+                        <button className="btn-ghost p-1.5" onClick={() => toggleAccount(p.id, account)}>
+                          {account.enabled ? <ToggleRight size={16} className="text-success" /> : <ToggleLeft size={16} />}
+                        </button>
+                        <button className="btn-danger p-1.5" onClick={() => deleteAccount(p.id, account.id)}>
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  {oauthAccountPresets.length > 0 && (
+                    <div className="grid grid-cols-12 gap-2 items-center">
+                      <select
+                        className="input col-span-8"
+                        value={selectedAccountOAuthPreset}
+                        onChange={e => setAccountOAuthPresetByProvider(prev => ({ ...prev, [p.id]: e.target.value }))}
+                      >
+                        {oauthAccountPresets.map(preset => (
+                          <option key={preset.id} value={preset.id}>{preset.name}</option>
+                        ))}
+                      </select>
+                      <button
+                        className="btn-primary col-span-4 px-2"
+                        disabled={!!accountOAuthLoading[p.id]}
+                        onClick={() => connectOAuthAccount(p)}
+                      >
+                        {accountOAuthLoading[p.id] ? 'Connecting...' : 'Add OAuth Account'}
+                      </button>
+                      {accountOAuthMsg[p.id] && (
+                        <p className={`col-span-12 text-xs ${accountOAuthMsg[p.id].startsWith('OAuth error') ? 'text-danger' : 'text-muted'}`}>
+                          {accountOAuthMsg[p.id]}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-12 gap-2">
+                    <input
+                      className="input col-span-3"
+                      placeholder="Account name"
+                      value={accountForm.name}
+                      onChange={e => setAccountForms(prev => ({ ...prev, [p.id]: { ...accountForm, name: e.target.value } }))}
+                    />
+                    <input
+                      className="input col-span-4 font-mono"
+                      type="password"
+                      placeholder="API key"
+                      value={accountForm.api_key}
+                      onChange={e => setAccountForms(prev => ({ ...prev, [p.id]: { ...accountForm, api_key: e.target.value } }))}
+                    />
+                    <input
+                      className="input col-span-3 font-mono"
+                      placeholder='Cookies JSON'
+                      value={accountForm.cookies_json}
+                      onChange={e => setAccountForms(prev => ({ ...prev, [p.id]: { ...accountForm, cookies_json: e.target.value } }))}
+                    />
+                    <input
+                      className="input col-span-1"
+                      placeholder="Prio"
+                      value={accountForm.priority}
+                      onChange={e => setAccountForms(prev => ({ ...prev, [p.id]: { ...accountForm, priority: e.target.value } }))}
+                    />
+                    <button className="btn-primary col-span-1 px-2" onClick={() => addAccount(p.id)}>
+                      <Plus size={14} />
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}

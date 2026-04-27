@@ -2,6 +2,7 @@
  * AI Gateway - Background Service Worker
  * Dynamic: works with ANY provider configured in the gateway.
  */
+const WEB_COOKIE_TYPES = new Set(['claude-web', 'chatgpt-web', 'bud-web', 'devin-web', 'perplexity-web']);
 
 /** Extract ALL cookies from a given URL/domain */
 async function extractCookiesFromUrl(url) {
@@ -227,7 +228,7 @@ async function extractDevinAuthFromTab(tabId, tabUrl) {
 }
 
 /** Push cookies to gateway for a specific provider */
-async function pushCookiesToGateway(providerId, cookies) {
+async function pushCookiesToGateway(providerId, cookies, account = {}) {
   const { gatewayUrl, extensionToken } = await chrome.storage.local.get(['gatewayUrl', 'extensionToken']);
   const url = (gatewayUrl || 'http://localhost:3000').replace(/\/$/, '');
   const token = extensionToken || 'ext-token-change-me';
@@ -240,13 +241,18 @@ async function pushCookiesToGateway(providerId, cookies) {
     const res = await fetch(`${url}/ext/cookies/${providerId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-extension-token': token },
-      body: JSON.stringify({ cookies }),
+      body: JSON.stringify({
+        cookies,
+        account_id: account.accountId || undefined,
+        account_name: account.accountName || undefined,
+      }),
     });
     if (!res.ok) {
       const text = await res.text();
       return { success: false, message: `Gateway ${res.status}: ${text}` };
     }
-    return { success: true, message: `Pushed ${Object.keys(cookies).length} cookies` };
+    const json = await res.json().catch(() => ({}));
+    return { success: true, message: `Pushed ${Object.keys(cookies).length} cookies${json.account ? ` to ${json.account}` : ''}` };
   } catch (err) {
     return { success: false, message: `Cannot reach gateway: ${err.message}` };
   }
@@ -258,6 +264,17 @@ async function fetchProviders() {
   const url = (gatewayUrl || 'http://localhost:3000').replace(/\/$/, '');
   const res = await fetch(`${url}/api/providers`, {
     headers: { 'x-admin-password': adminPassword || '' },
+  });
+  if (!res.ok) throw new Error(`Gateway ${res.status}`);
+  return res.json();
+}
+
+async function fetchProviderAccounts(providerId) {
+  const { gatewayUrl, extensionToken } = await chrome.storage.local.get(['gatewayUrl', 'extensionToken']);
+  const url = (gatewayUrl || 'http://localhost:3000').replace(/\/$/, '');
+  const token = extensionToken || 'ext-token-change-me';
+  const res = await fetch(`${url}/ext/providers/${providerId}/accounts`, {
+    headers: { 'x-extension-token': token },
   });
   if (!res.ok) throw new Error(`Gateway ${res.status}`);
   return res.json();
@@ -397,7 +414,7 @@ async function resolveExtractionTarget(providerId, tabUrl, tabId) {
   return target;
 }
 
-async function extractAndPush(providerId, tabUrl, tabId) {
+async function extractAndPush(providerId, tabUrl, tabId, account = {}) {
   const target = await resolveExtractionTarget(providerId, tabUrl, tabId);
   try {
     const cookies = {
@@ -407,7 +424,7 @@ async function extractAndPush(providerId, tabUrl, tabId) {
     };
     const budAuth = await extractBudAuthFromTab(target.tabId, target.tabUrl);
     const devinAuth = await extractDevinAuthFromTab(target.tabId, target.tabUrl);
-    return pushCookiesToGateway(providerId, { ...cookies, ...budAuth, ...devinAuth });
+    return pushCookiesToGateway(providerId, { ...cookies, ...budAuth, ...devinAuth }, account);
   } finally {
     await closeTemporaryBudTab(target);
     await closeTemporaryDevinTab(target);
@@ -428,6 +445,7 @@ async function handleTabUpdate(tabId, changeInfo, tab) {
 
   for (const p of providers) {
     if (!p.base_url || !p.enabled) continue;
+    if (!WEB_COOKIE_TYPES.has(p.type)) continue;
     try {
       const providerUrl = new URL(p.base_url);
       if (providerUrl.hostname !== tabUrl.hostname) continue;
@@ -447,8 +465,8 @@ chrome.tabs.onUpdated.addListener(handleTabUpdate);
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'EXTRACT_AND_PUSH') {
-    const { providerId, tabUrl, tabId } = msg;
-    extractAndPush(providerId, tabUrl, tabId)
+    const { providerId, tabUrl, tabId, accountId, accountName } = msg;
+    extractAndPush(providerId, tabUrl, tabId, { accountId, accountName })
       .then(sendResponse)
       .catch(err => sendResponse({ success: false, message: err.message }));
     return true;
@@ -456,6 +474,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'FETCH_PROVIDERS') {
     fetchProviders().then(providers => sendResponse({ success: true, providers }))
+      .catch(err => sendResponse({ success: false, message: err.message }));
+    return true;
+  }
+
+  if (msg.type === 'FETCH_PROVIDER_ACCOUNTS') {
+    fetchProviderAccounts(msg.providerId).then(accounts => sendResponse({ success: true, accounts }))
       .catch(err => sendResponse({ success: false, message: err.message }));
     return true;
   }

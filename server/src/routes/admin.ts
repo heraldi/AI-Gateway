@@ -3,11 +3,35 @@ import { v4 as uuid } from 'uuid';
 import { db, getSetting, setSetting } from '../db/index.js';
 import { hashApiKey } from '../middleware/auth.js';
 import { fetchAllModels, resolveProvider, resolveByProvider } from '../providers/registry.js';
-import type { Provider, GatewayKey, RequestLog, ModelAlias } from '../db/index.js';
+import type { Provider, ProviderAccount, GatewayKey, RequestLog, ModelAlias } from '../db/index.js';
 import { classifyModelCapability } from '../providers/capabilities.js';
 import { postOpenAIBinary, postOpenAIJson, supportsOpenAIJsonEndpoint } from '../providers/adapters/openai.js';
 
 export const adminRouter = Router();
+
+function authTypeFromCredentials(apiKey?: string | null, cookies?: object | string | null): string {
+  if (cookies) {
+    try {
+      const parsed = typeof cookies === 'string' ? JSON.parse(cookies) as Record<string, unknown> : cookies as Record<string, unknown>;
+      if (typeof parsed.oauth_provider === 'string') return 'oauth';
+    } catch {
+      // fall through
+    }
+    return 'cookies';
+  }
+  return apiKey ? 'key' : 'none';
+}
+
+function maskAccount(a: ProviderAccount): Omit<ProviderAccount, 'api_key' | 'cookies'> & {
+  api_key: string | null;
+  cookies: string | null;
+} {
+  return {
+    ...a,
+    api_key: a.api_key ? `${a.api_key.slice(0, 8)}...` : null,
+    cookies: a.cookies ? '[configured]' : null,
+  };
+}
 
 /** Infer provider type from base URL when not explicitly specified */
 function inferType(baseUrl: string): string {
@@ -66,11 +90,18 @@ adminRouter.get('/stats', (_req, res) => {
 
 adminRouter.get('/providers', (_req, res) => {
   const providers = db.prepare('SELECT * FROM providers ORDER BY priority DESC, created_at ASC').all() as Provider[];
+  const accountCounts = db.prepare(`
+    SELECT provider_id, COUNT(*) as total, SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled
+    FROM provider_accounts GROUP BY provider_id
+  `).all() as { provider_id: string; total: number; enabled: number | null }[];
+  const countsByProvider = new Map(accountCounts.map(c => [c.provider_id, c]));
   // Mask api_key partially
   res.json(providers.map(p => ({
     ...p,
     api_key: p.api_key ? `${p.api_key.slice(0, 8)}...` : null,
     cookies: p.cookies ? '[configured]' : null,
+    account_count: countsByProvider.get(p.id)?.total ?? 0,
+    enabled_account_count: countsByProvider.get(p.id)?.enabled ?? 0,
     auth_type: (() => {
       try {
         const parsed = p.cookies ? JSON.parse(p.cookies) as Record<string, unknown> : {};
@@ -146,6 +177,76 @@ adminRouter.put('/providers/:id', (req, res) => {
 
 adminRouter.delete('/providers/:id', (req, res) => {
   db.prepare('DELETE FROM providers WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+adminRouter.get('/providers/:id/accounts', (req, res) => {
+  const rows = db.prepare('SELECT * FROM provider_accounts WHERE provider_id = ? ORDER BY priority DESC, created_at ASC')
+    .all(req.params.id) as ProviderAccount[];
+  res.json(rows.map(maskAccount));
+});
+
+adminRouter.post('/providers/:id/accounts', (req, res) => {
+  const provider = db.prepare('SELECT id FROM providers WHERE id = ?').get(req.params.id) as { id: string } | undefined;
+  if (!provider) { res.status(404).json({ error: 'provider not found' }); return; }
+  const { name, auth_type, api_key, cookies, extra_headers, priority = 0, enabled = true } = req.body as {
+    name?: string; auth_type?: string; api_key?: string; cookies?: object; extra_headers?: object; priority?: number; enabled?: boolean;
+  };
+  const now = Date.now();
+  const id = uuid();
+  db.prepare(`
+    INSERT INTO provider_accounts
+      (id, provider_id, name, auth_type, api_key, cookies, extra_headers, enabled, priority, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    req.params.id,
+    name?.trim() || 'Account',
+    auth_type || authTypeFromCredentials(api_key, cookies),
+    api_key || null,
+    cookies ? JSON.stringify(cookies) : null,
+    extra_headers ? JSON.stringify(extra_headers) : null,
+    enabled ? 1 : 0,
+    priority,
+    now,
+    now,
+  );
+  res.status(201).json({ id });
+});
+
+adminRouter.put('/providers/:providerId/accounts/:accountId', (req, res) => {
+  const existing = db.prepare('SELECT * FROM provider_accounts WHERE id = ? AND provider_id = ?')
+    .get(req.params.accountId, req.params.providerId) as ProviderAccount | undefined;
+  if (!existing) { res.status(404).json({ error: 'account not found' }); return; }
+  const { name, auth_type, api_key, cookies, extra_headers, priority, enabled, cooldown_until } = req.body as {
+    name?: string; auth_type?: string; api_key?: string; cookies?: object | null; extra_headers?: object | null; priority?: number; enabled?: boolean; cooldown_until?: number | null;
+  };
+  const nextApiKey = api_key !== undefined ? (api_key || null) : existing.api_key;
+  const nextCookies = cookies !== undefined ? (cookies ? JSON.stringify(cookies) : null) : existing.cookies;
+  db.prepare(`
+    UPDATE provider_accounts SET
+      name = ?, auth_type = ?, api_key = ?, cookies = ?, extra_headers = ?,
+      enabled = ?, priority = ?, cooldown_until = ?, updated_at = ?
+    WHERE id = ? AND provider_id = ?
+  `).run(
+    name?.trim() || existing.name,
+    auth_type || authTypeFromCredentials(nextApiKey, nextCookies),
+    nextApiKey,
+    nextCookies,
+    extra_headers !== undefined ? (extra_headers ? JSON.stringify(extra_headers) : null) : existing.extra_headers,
+    enabled !== undefined ? (enabled ? 1 : 0) : existing.enabled,
+    priority ?? existing.priority,
+    cooldown_until !== undefined ? cooldown_until : existing.cooldown_until,
+    Date.now(),
+    req.params.accountId,
+    req.params.providerId,
+  );
+  res.json({ ok: true });
+});
+
+adminRouter.delete('/providers/:providerId/accounts/:accountId', (req, res) => {
+  db.prepare('DELETE FROM provider_accounts WHERE id = ? AND provider_id = ?')
+    .run(req.params.accountId, req.params.providerId);
   res.json({ ok: true });
 });
 

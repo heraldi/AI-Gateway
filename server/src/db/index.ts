@@ -48,6 +48,27 @@ db.exec(`
     FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS provider_accounts (
+    id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    auth_type TEXT DEFAULT 'key',
+    api_key TEXT,
+    cookies TEXT,
+    extra_headers TEXT,
+    enabled INTEGER DEFAULT 1,
+    priority INTEGER DEFAULT 0,
+    requests_count INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+    last_used_at INTEGER,
+    last_error_at INTEGER,
+    cooldown_until INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE,
+    UNIQUE(provider_id, name)
+  );
+
   CREATE TABLE IF NOT EXISTS gateway_keys (
     id TEXT PRIMARY KEY,
     key_hash TEXT UNIQUE NOT NULL,
@@ -90,6 +111,89 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_model_routes_pattern ON model_routes(pattern);
   CREATE INDEX IF NOT EXISTS idx_model_aliases_alias ON model_aliases(alias);
   CREATE INDEX IF NOT EXISTS idx_model_aliases_provider_model ON model_aliases(provider_id, upstream_model);
+  CREATE INDEX IF NOT EXISTS idx_provider_accounts_provider ON provider_accounts(provider_id, enabled, priority);
+`);
+
+db.exec(`
+  INSERT OR IGNORE INTO provider_accounts
+    (id, provider_id, name, auth_type, api_key, cookies, extra_headers, enabled, priority, created_at, updated_at)
+  SELECT
+    lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))),
+    id,
+    'Default',
+    CASE
+      WHEN cookies LIKE '%"oauth_provider"%' THEN 'oauth'
+      WHEN cookies IS NOT NULL THEN 'cookies'
+      ELSE 'key'
+    END,
+    api_key,
+    cookies,
+    extra_headers,
+    enabled,
+    priority,
+    created_at,
+    updated_at
+  FROM providers
+  WHERE (api_key IS NOT NULL OR cookies IS NOT NULL OR extra_headers IS NOT NULL)
+    AND NOT EXISTS (SELECT 1 FROM provider_accounts pa WHERE pa.provider_id = providers.id);
+
+  CREATE TRIGGER IF NOT EXISTS trg_provider_default_account_insert
+  AFTER INSERT ON providers
+  WHEN NEW.api_key IS NOT NULL OR NEW.cookies IS NOT NULL OR NEW.extra_headers IS NOT NULL
+  BEGIN
+    INSERT OR IGNORE INTO provider_accounts
+      (id, provider_id, name, auth_type, api_key, cookies, extra_headers, enabled, priority, created_at, updated_at)
+    VALUES (
+      lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))),
+      NEW.id,
+      'Default',
+      CASE
+        WHEN NEW.cookies LIKE '%"oauth_provider"%' THEN 'oauth'
+        WHEN NEW.cookies IS NOT NULL THEN 'cookies'
+        ELSE 'key'
+      END,
+      NEW.api_key,
+      NEW.cookies,
+      NEW.extra_headers,
+      NEW.enabled,
+      NEW.priority,
+      NEW.created_at,
+      NEW.updated_at
+    );
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_provider_default_account_update
+  AFTER UPDATE OF api_key, cookies, extra_headers, enabled, priority ON providers
+  WHEN NEW.api_key IS NOT NULL OR NEW.cookies IS NOT NULL OR NEW.extra_headers IS NOT NULL
+  BEGIN
+    INSERT INTO provider_accounts
+      (id, provider_id, name, auth_type, api_key, cookies, extra_headers, enabled, priority, created_at, updated_at)
+    VALUES (
+      lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))),
+      NEW.id,
+      'Default',
+      CASE
+        WHEN NEW.cookies LIKE '%"oauth_provider"%' THEN 'oauth'
+        WHEN NEW.cookies IS NOT NULL THEN 'cookies'
+        ELSE 'key'
+      END,
+      NEW.api_key,
+      NEW.cookies,
+      NEW.extra_headers,
+      NEW.enabled,
+      NEW.priority,
+      COALESCE((SELECT created_at FROM provider_accounts WHERE provider_id = NEW.id AND name = 'Default'), NEW.created_at),
+      NEW.updated_at
+    )
+    ON CONFLICT(provider_id, name) DO UPDATE SET
+      auth_type = excluded.auth_type,
+      api_key = excluded.api_key,
+      cookies = excluded.cookies,
+      extra_headers = excluded.extra_headers,
+      enabled = excluded.enabled,
+      priority = excluded.priority,
+      updated_at = excluded.updated_at;
+  END;
 `);
 
 export type Provider = {
@@ -103,6 +207,25 @@ export type Provider = {
   enabled: number;
   priority: number;
   notes: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+export type ProviderAccount = {
+  id: string;
+  provider_id: string;
+  name: string;
+  auth_type: string | null;
+  api_key: string | null;
+  cookies: string | null;
+  extra_headers: string | null;
+  enabled: number;
+  priority: number;
+  requests_count: number;
+  error_count: number;
+  last_used_at: number | null;
+  last_error_at: number | null;
+  cooldown_until: number | null;
   created_at: number;
   updated_at: number;
 };
@@ -169,6 +292,7 @@ export function resetDb(): void {
     DROP TABLE IF EXISTS request_logs;
     DROP TABLE IF EXISTS model_routes;
     DROP TABLE IF EXISTS model_aliases;
+    DROP TABLE IF EXISTS provider_accounts;
     DROP TABLE IF EXISTS gateway_keys;
     DROP TABLE IF EXISTS providers;
     DROP TABLE IF EXISTS settings;
