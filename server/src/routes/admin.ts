@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
 import { db, getSetting, setSetting } from '../db/index.js';
 import { hashApiKey } from '../middleware/auth.js';
-import { fetchAllModels, resolveProvider } from '../providers/registry.js';
+import { fetchAllModels, resolveProvider, resolveByProvider } from '../providers/registry.js';
 import type { Provider, GatewayKey, RequestLog, ModelAlias } from '../db/index.js';
 
 export const adminRouter = Router();
@@ -15,6 +15,7 @@ function inferType(baseUrl: string): string {
   if (u.includes('api.z.ai/api/anthropic') || u.includes('api.minimax.io/anthropic') || u.includes('api.minimaxi.com/anthropic') || u.includes('api.kimi.com/coding')) return 'anthropic-compatible';
   if (u.includes('bud.app'))            return 'bud-web';
   if (u.includes('app.devin.ai'))       return 'devin-web';
+  if (u.includes('perplexity.ai') && !u.includes('api.perplexity.ai')) return 'perplexity-web';
   if (u.includes('cloudcode-pa.googleapis.com')) return 'gemini-cli';
   if (u.includes('daily-cloudcode-pa.googleapis.com')) return 'antigravity';
   if (u.includes('backend-api/codex')) return 'codex';
@@ -340,10 +341,11 @@ adminRouter.get('/models', async (_req, res) => {
 
 adminRouter.post('/models/test', async (req, res) => {
   const startedAt = Date.now();
-  const { model, prompt } = req.body as { model?: string; prompt?: string };
+  const { model, prompt, provider_id } = req.body as { model?: string; prompt?: string; provider_id?: string };
   if (!model) { res.status(400).json({ error: 'model is required' }); return; }
 
-  const resolved = resolveProvider(model);
+  // If provider_id is supplied, route directly — no fallback to other providers.
+  const resolved = provider_id ? resolveByProvider(provider_id, model) : resolveProvider(model);
   if (!resolved) { res.status(404).json({ error: `No provider found for model: ${model}` }); return; }
 
   const { adapter, config, resolvedModel } = resolved;

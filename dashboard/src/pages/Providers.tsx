@@ -31,6 +31,7 @@ function detectType(url: string): string {
   if (u.includes('api.z.ai/api/anthropic') || u.includes('api.minimax.io/anthropic') || u.includes('api.minimaxi.com/anthropic') || u.includes('api.kimi.com/coding')) return 'anthropic-compatible';
   if (u.includes('bud.app'))           return 'bud-web';
   if (u.includes('app.devin.ai'))      return 'devin-web';
+  if (u.includes('perplexity.ai') && !u.includes('api.perplexity.ai')) return 'perplexity-web';
   if (u.includes('claude.ai'))         return 'claude-web';
   if (u.includes('chatgpt.com') || u.includes('chat.openai.com')) return 'chatgpt-web';
   if (u.includes('api.openai.com'))    return 'openai';
@@ -100,7 +101,7 @@ export default function ProvidersPage() {
   useEffect(() => { load(); }, []);
 
   const detectedType = form.provider_type || detectType(form.base_url);
-  const isCookieBased = detectedType === 'claude-web' || detectedType === 'chatgpt-web' || detectedType === 'bud-web' || detectedType === 'devin-web';
+  const isCookieBased = detectedType === 'claude-web' || detectedType === 'chatgpt-web' || detectedType === 'bud-web' || detectedType === 'devin-web' || detectedType === 'perplexity-web';
   const selectedPreset = PROVIDER_PRESETS.find(p => p.id === selectedPresetId);
   const isOAuthPreset = !!selectedPreset?.oauth;
   const flowPresets = PROVIDER_PRESETS.filter(p => (p.flow ?? 'api-key') === selectedFlow);

@@ -55,6 +55,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = ([
   { id: 'ollama-local', name: 'Ollama Local', type: 'ollama', base_url: 'http://localhost:11434', flow: 'local' },
   { id: 'bud-web', name: 'Bud Web', type: 'bud-web', base_url: 'https://bud.app', flow: 'web-cookie' },
   { id: 'devin-web', name: 'Devin Web', type: 'devin-web', base_url: 'https://app.devin.ai', flow: 'web-cookie' },
+  { id: 'perplexity-web', name: 'Perplexity Web (Free)', type: 'perplexity-web', base_url: 'https://www.perplexity.ai', flow: 'web-cookie', notes: 'Uses session cookies from perplexity.ai. Extract with Chrome extension. Free account — no API key required.' },
 ] as ProviderPreset[]).map((preset): ProviderPreset => ({
   ...preset,
   flow: (preset.flow ?? (preset.oauth ? 'oauth' : 'api-key')) as ProviderPreset['flow'],

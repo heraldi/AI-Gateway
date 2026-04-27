@@ -7,6 +7,7 @@ import { ClaudeWebAdapter } from './adapters/claude-web.js';
 import { ChatGPTWebAdapter } from './adapters/chatgpt-web.js';
 import { BudWebAdapter } from './adapters/bud-web.js';
 import { DevinWebAdapter } from './adapters/devin-web.js';
+import { PerplexityWebAdapter } from './adapters/perplexity-web.js';
 import { GeminiCliAdapter, AntigravityAdapter } from './adapters/cloudcode.js';
 import { CodexAdapter } from './adapters/codex.js';
 import { CursorAdapter, KiroAdapter } from './adapters/not-ported.js';
@@ -21,6 +22,7 @@ const ADAPTERS: Record<ProviderType, ProviderAdapter> = {
   'chatgpt-web': ChatGPTWebAdapter,
   'bud-web': BudWebAdapter,
   'devin-web': DevinWebAdapter,
+  'perplexity-web': PerplexityWebAdapter,
   'gemini-cli': GeminiCliAdapter,
   'antigravity': AntigravityAdapter,
   'codex': CodexAdapter,
@@ -44,6 +46,7 @@ function effectiveProviderType(p: Pick<Provider, 'type' | 'base_url'>): Provider
   const base = p.base_url?.toLowerCase() ?? '';
   if (base.includes('app.devin.ai')) return 'devin-web';
   if (base.includes('bud.app')) return 'bud-web';
+  if (base.includes('perplexity.ai') && !base.includes('api.perplexity.ai')) return 'perplexity-web';
   if (base.includes('claude.ai')) return 'claude-web';
   if (base.includes('chatgpt.com') || base.includes('chat.openai.com')) return 'chatgpt-web';
   return p.type as ProviderType;
@@ -74,6 +77,22 @@ export function dbProviderToConfig(p: Provider): ProviderConfig {
     cookies: p.cookies ? JSON.parse(p.cookies) : undefined,
     extraHeaders: p.extra_headers ? JSON.parse(p.extra_headers) : undefined,
   };
+}
+
+/** Resolve directly to a specific provider by ID, bypassing all routing heuristics.
+ *  If `model` is an alias on this provider, resolves to the upstream model automatically. */
+export function resolveByProvider(providerId: string, model: string): ReturnType<typeof resolveProvider> {
+  const p = db.prepare('SELECT * FROM providers WHERE id = ? AND enabled = 1').get(providerId) as Provider | undefined;
+  if (!p) return null;
+  const config = dbProviderToConfig(p);
+
+  // Resolve alias → upstream model (alias is provider-scoped in the UI but globally unique in DB)
+  const alias = db.prepare(
+    'SELECT upstream_model FROM model_aliases WHERE provider_id = ? AND alias = ?'
+  ).get(providerId, model) as { upstream_model: string } | undefined;
+
+  const resolvedModel = alias?.upstream_model ?? model;
+  return { adapter: getAdapter(config.type), config, resolvedModel };
 }
 
 /** Find the best provider+adapter for a given model name */
@@ -150,8 +169,13 @@ function autoDetectProvider(model: string): ReturnType<typeof resolveProvider> {
     'SELECT * FROM providers WHERE enabled = 1 ORDER BY priority DESC'
   ).all() as Provider[];
 
-  // Match by model prefix conventions
-  const isBudWeb = ['auto', 'claude-sonnet-4-6', 'claude-opus-4.6', 'gpt-5.5', 'gpt-5.4', 'gpt-5.3-codex'].includes(model);
+  // Match by model prefix conventions.
+  // Bud-exclusive model names: gpt-5.x and claude-opus-4.6 are only served by Bud.
+  // 'auto' routes to Bud only when no other specific match is found.
+  // claude-sonnet-4-6 is intentionally NOT in this list — it's a real Anthropic model too.
+  const BUD_EXCLUSIVE = new Set(['auto', 'claude-opus-4.6', 'gpt-5.5', 'gpt-5.4', 'gpt-5.3-codex']);
+  const isBudWeb = BUD_EXCLUSIVE.has(model);
+  const isPerplexityWeb = model === 'perplexity-auto' || model.startsWith('sonar');
   const isAnthropic = model.startsWith('claude');
   const isOpenAI = model.startsWith('gpt') || model.startsWith('o1') || model.startsWith('o3') || model.startsWith('o4');
   const isXAI = model.startsWith('grok');
@@ -160,6 +184,14 @@ function autoDetectProvider(model: string): ReturnType<typeof resolveProvider> {
   const isGemini = model.startsWith('gemini');
   const isKiro = model.startsWith('kiro');
   const isCursor = model.startsWith('cursor');
+
+  if (isPerplexityWeb) {
+    const p = pickRoundRobin(providers.filter(p => effectiveProviderType(p) === 'perplexity-web'), 'auto:perplexity');
+    if (p) {
+      const config = dbProviderToConfig(p);
+      return { adapter: getAdapter('perplexity-web'), config, resolvedModel: model };
+    }
+  }
 
   if (isCursor) {
     const p = pickRoundRobin(providers.filter(p => p.type === 'cursor'), 'auto:cursor');

@@ -175,7 +175,7 @@ export const api = {
   },
   models: {
     list: () => get<ModelsResult>('/models'),
-    test: (data: { model: string; prompt?: string }) => post<ModelTestResult>('/models/test', data),
+    test: (data: { model: string; prompt?: string; provider_id?: string }) => post<ModelTestResult>('/models/test', data),
   },
   oauth: {
     start: (provider: OAuthProvider) => post<OAuthStartResult>(`/oauth/${provider}/start`, {}),

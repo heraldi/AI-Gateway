@@ -7,6 +7,7 @@ export type ProviderType =
   | 'chatgpt-web'
   | 'bud-web'
   | 'devin-web'
+  | 'perplexity-web'
   | 'gemini-cli'
   | 'antigravity'
   | 'codex'

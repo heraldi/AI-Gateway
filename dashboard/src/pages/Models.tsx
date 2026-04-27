@@ -16,6 +16,7 @@ export default function ModelsPage() {
   const [newOverride, setNewOverride] = useState('');
   const [testPrompt, setTestPrompt] = useState('Reply with a short OK if this model is working.');
   const [testingModel, setTestingModel] = useState('');
+  const [testingProvider, setTestingProvider] = useState('');
   const [testResult, setTestResult] = useState<ModelTestResult | null>(null);
   const [aliasEditingKey, setAliasEditingKey] = useState('');
   const [aliasValue, setAliasValue] = useState('');
@@ -99,23 +100,28 @@ export default function ModelsPage() {
     await loadModels();
   }
 
-  async function testModel(model: string) {
+  async function testModel(model: string, providerId?: string) {
+    const providerName = providerId
+      ? (providers.find(p => p.id === providerId)?.name ?? '')
+      : '';
     setTestingModel(model);
+    setTestingProvider(providerName);
     setTestResult(null);
     try {
-      const result = await api.models.test({ model, prompt: testPrompt });
+      const result = await api.models.test({ model, prompt: testPrompt, provider_id: providerId });
       setTestResult(result);
     } catch (e) {
       setTestResult({
         ok: false,
         model,
         resolvedModel: model,
-        provider: { id: '', name: 'Gateway', type: 'gateway' },
+        provider: { id: providerId ?? '', name: providerName || 'Gateway', type: '' },
         latency: 0,
         error: String(e),
       });
     } finally {
       setTestingModel('');
+      setTestingProvider('');
     }
   }
 
@@ -188,7 +194,11 @@ export default function ModelsPage() {
       <div className="card space-y-3">
         <div className="flex items-center justify-between gap-3">
           <h3 className="text-sm font-medium">Model Test</h3>
-          {testingModel && <span className="text-xs text-muted font-mono truncate">Testing {testingModel}</span>}
+          {testingModel && (
+            <span className="text-xs text-muted font-mono truncate">
+              Testing {testingModel}{testingProvider ? ` · ${testingProvider}` : ''}
+            </span>
+          )}
         </div>
         <div className="flex flex-col sm:flex-row gap-2">
           <input
@@ -283,7 +293,7 @@ export default function ModelsPage() {
                         className="btn-ghost p-1 flex-shrink-0"
                         title="Test model"
                         disabled={!!testingModel}
-                        onClick={() => testModel(m.id)}
+                        onClick={() => testModel(m.id, m.provider_id)}
                       >
                         <Play size={12} className={testingModel === m.id ? 'animate-pulse' : ''} />
                       </button>

@@ -62,8 +62,9 @@
       'openai-compatible': ['OAI Compat',    'badge-gray'],
       'claude-web':        ['Claude Web',    'badge-blue'],
       'chatgpt-web':       ['ChatGPT Web',   'badge-green'],
-      'bud-web':           ['Bud Web',       'badge-green'],
-      'devin-web':         ['Devin Web',     'badge-green'],
+      'bud-web':           ['Bud Web',         'badge-green'],
+      'devin-web':         ['Devin Web',       'badge-green'],
+      'perplexity-web':    ['Perplexity Web',  'badge-yellow'],
       'ollama':            ['Ollama',         'badge-yellow'],
     };
     const [label, cls] = map[type] ?? [type, 'badge-gray'];
