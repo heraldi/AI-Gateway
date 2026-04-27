@@ -28,6 +28,17 @@ export interface ProviderConfig {
 
 // --- Normalized internal formats ---
 
+export type ModelCapability =
+  | 'chat'
+  | 'embedding'
+  | 'image'
+  | 'tts'
+  | 'transcription'
+  | 'video'
+  | 'rerank'
+  | 'moderation'
+  | 'unknown';
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string | ContentPart[];
@@ -93,6 +104,7 @@ export interface ProviderAdapter {
 export interface ModelInfo {
   id: string;
   name: string;
+  capability?: ModelCapability;
   context_length?: number;
   owned_by?: string;
   created?: number;

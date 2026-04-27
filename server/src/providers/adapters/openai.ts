@@ -2,6 +2,7 @@ import type {
   ProviderAdapter, ProviderConfig, NormalizedRequest,
   NormalizedResponse, StreamChunk, ModelInfo
 } from '../types.js';
+import { classifyModelCapability } from '../capabilities.js';
 
 const DEFAULT_BASE = 'https://api.openai.com';
 
@@ -9,16 +10,17 @@ function normalizeBase(url: string): string {
   return url.replace(/\/$/, '');
 }
 
-function endpoint(base: string, path: 'models' | 'chat/completions'): string {
+export function openAIEndpoint(baseUrl: string | undefined, path: string): string {
+  const base = normalizeBase(baseUrl ?? DEFAULT_BASE);
   if (/\/chat\/completions$/i.test(base)) {
     return path === 'chat/completions'
       ? base
-      : base.replace(/\/chat\/completions$/i, '/models');
+      : base.replace(/\/chat\/completions$/i, `/${path}`);
   }
   if (/\/models$/i.test(base)) {
     return path === 'models'
       ? base
-      : base.replace(/\/models$/i, '/chat/completions');
+      : base.replace(/\/models$/i, `/${path}`);
   }
   if (/\/v\d+(?:\/[^/]*)?$/i.test(base) || /\/compatible-mode\/v\d+$/i.test(base)) {
     return `${base}/${path}`;
@@ -26,12 +28,58 @@ function endpoint(base: string, path: 'models' | 'chat/completions'): string {
   return `${base}/v1/${path}`;
 }
 
-function buildHeaders(config: ProviderConfig): Record<string, string> {
+function endpoint(base: string, path: string): string {
+  return openAIEndpoint(base, path);
+}
+
+export function buildOpenAIHeaders(config: ProviderConfig): Record<string, string> {
   return {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${config.apiKey ?? ''}`,
     ...config.extraHeaders,
   };
+}
+
+export function supportsOpenAIJsonEndpoint(config: ProviderConfig): boolean {
+  return ['openai', 'openai-compatible', 'ollama', 'gitlab'].includes(config.type);
+}
+
+export async function postOpenAIJson(config: ProviderConfig, path: string, body: unknown): Promise<{
+  status: number;
+  ok: boolean;
+  data: unknown;
+  text: string;
+}> {
+  const res = await fetch(openAIEndpoint(config.baseUrl, path), {
+    method: 'POST',
+    headers: buildOpenAIHeaders(config),
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let data: unknown = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+  return { status: res.status, ok: res.ok, data, text };
+}
+
+export async function postOpenAIBinary(config: ProviderConfig, path: string, body: unknown): Promise<{
+  status: number;
+  ok: boolean;
+  contentType: string;
+  data: Buffer;
+  text: string;
+}> {
+  const res = await fetch(openAIEndpoint(config.baseUrl, path), {
+    method: 'POST',
+    headers: buildOpenAIHeaders(config),
+    body: JSON.stringify(body),
+  });
+  const contentType = res.headers.get('content-type') ?? 'application/octet-stream';
+  const data = Buffer.from(await res.arrayBuffer());
+  return { status: res.status, ok: res.ok, contentType, data, text: data.toString('utf8') };
 }
 
 function looksLikeHtml(text: string): boolean {
@@ -57,7 +105,7 @@ export const OpenAIAdapter: ProviderAdapter = {
   async listModels(config) {
     const base = normalizeBase(config.baseUrl ?? DEFAULT_BASE);
     const url = endpoint(base, 'models');
-    const res = await fetch(url, { headers: buildHeaders(config) });
+    const res = await fetch(url, { headers: buildOpenAIHeaders(config) });
     const contentType = res.headers.get('content-type') ?? '';
     const text = await res.text().catch(() => res.statusText);
     if (!res.ok) {
@@ -75,6 +123,7 @@ export const OpenAIAdapter: ProviderAdapter = {
     return (data.data ?? []).map(m => ({
       id: m.id,
       name: m.id,
+      capability: classifyModelCapability(m.id, m.owned_by),
       owned_by: m.owned_by,
       created: m.created,
     }));
@@ -93,7 +142,7 @@ export const OpenAIAdapter: ProviderAdapter = {
 
     const res = await fetch(endpoint(base, 'chat/completions'), {
       method: 'POST',
-      headers: buildHeaders(config),
+      headers: buildOpenAIHeaders(config),
       body: JSON.stringify(body),
     });
 
@@ -133,7 +182,7 @@ export const OpenAIAdapter: ProviderAdapter = {
 
     const res = await fetch(endpoint(base, 'chat/completions'), {
       method: 'POST',
-      headers: buildHeaders(config),
+      headers: buildOpenAIHeaders(config),
       body: JSON.stringify(body),
     });
 

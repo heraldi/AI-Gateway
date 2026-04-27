@@ -8,6 +8,8 @@ import { resolveProvider, fetchAllModels } from '../providers/registry.js';
 import type { NormalizedRequest } from '../providers/types.js';
 import { logRequest } from '../middleware/logger.js';
 import { compressNormalizedRequest, formatTokenSaverLog } from '../providers/token-saver.js';
+import { classifyModelCapability } from '../providers/capabilities.js';
+import { postOpenAIBinary, postOpenAIJson, supportsOpenAIJsonEndpoint } from '../providers/adapters/openai.js';
 
 export const openaiRouter = Router();
 
@@ -24,8 +26,130 @@ openaiRouter.get('/models', async (_req, res) => {
       object: 'model',
       created: m.created ?? Math.floor(Date.now() / 1000),
       owned_by: m.owned_by ?? 'custom',
+      capability: m.capability ?? classifyModelCapability(m.id, m.owned_by),
     })),
   });
+});
+
+function requestGatewayKeyId(req: Request): string | undefined {
+  return (req as Request & { gatewayKeyId?: string }).gatewayKeyId;
+}
+
+async function forwardOpenAIJsonEndpoint(req: Request, res: Response, path: string, endpointName: string): Promise<void> {
+  const start = Date.now();
+  const body = req.body as { model?: string; [key: string]: unknown };
+  const requestId = `${endpointName.replace(/\W/g, '')}-${uuid().replace(/-/g, '').slice(0, 24)}`;
+
+  if (!body.model) {
+    res.status(400).json({ error: { message: 'model is required', type: 'invalid_request_error' } });
+    return;
+  }
+
+  const resolved = resolveProvider(body.model);
+  if (!resolved) {
+    res.status(404).json({ error: { message: `No provider found for model: ${body.model}`, type: 'model_not_found' } });
+    return;
+  }
+
+  const { config, resolvedModel } = resolved;
+  if (!supportsOpenAIJsonEndpoint(config)) {
+    const message = `${config.type} provider does not support OpenAI-compatible ${endpointName}.`;
+    res.status(400).json({ error: { message, type: 'unsupported_endpoint' } });
+    logRequest({ id: requestId, provider_id: config.id, model: resolvedModel, endpoint: endpointName, status: 400, latency: Date.now() - start, error: message, gateway_key_id: requestGatewayKeyId(req), req_body: body });
+    return;
+  }
+
+  const upstreamBody = { ...body, model: resolvedModel };
+  try {
+    const upstream = await postOpenAIJson(config, path, upstreamBody);
+    if (!upstream.ok) {
+      res.status(upstream.status).type('application/json').send(upstream.text);
+      logRequest({ id: requestId, provider_id: config.id, model: resolvedModel, endpoint: endpointName, status: upstream.status, latency: Date.now() - start, error: upstream.text.slice(0, 500), gateway_key_id: requestGatewayKeyId(req), req_body: body });
+      return;
+    }
+
+    const usage = typeof upstream.data === 'object' && upstream.data && 'usage' in upstream.data
+      ? (upstream.data as { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }).usage
+      : undefined;
+    res.json(upstream.data);
+    logRequest({
+      id: requestId,
+      provider_id: config.id,
+      model: resolvedModel,
+      endpoint: endpointName,
+      input_tokens: usage?.prompt_tokens ?? usage?.total_tokens,
+      output_tokens: usage?.completion_tokens ?? 0,
+      status: 200,
+      latency: Date.now() - start,
+      gateway_key_id: requestGatewayKeyId(req),
+      req_body: body,
+      res_body: typeof upstream.data === 'object' && upstream.data ? upstream.data as object : { response: upstream.text.slice(0, 500) },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: { message: msg, type: 'api_error' } });
+    logRequest({ id: requestId, provider_id: config.id, model: resolvedModel, endpoint: endpointName, status: 500, latency: Date.now() - start, error: msg, gateway_key_id: requestGatewayKeyId(req), req_body: body });
+  }
+}
+
+// POST /v1/embeddings
+openaiRouter.post('/embeddings', (req, res) => {
+  void forwardOpenAIJsonEndpoint(req, res, 'embeddings', 'embeddings');
+});
+
+// POST /v1/images/generations
+openaiRouter.post('/images/generations', (req, res) => {
+  void forwardOpenAIJsonEndpoint(req, res, 'images/generations', 'images.generations');
+});
+
+// POST /v1/moderations
+openaiRouter.post('/moderations', (req, res) => {
+  void forwardOpenAIJsonEndpoint(req, res, 'moderations', 'moderations');
+});
+
+// POST /v1/rerank - not an OpenAI core endpoint, but many compatible providers expose it.
+openaiRouter.post('/rerank', (req, res) => {
+  void forwardOpenAIJsonEndpoint(req, res, 'rerank', 'rerank');
+});
+
+// POST /v1/audio/speech
+openaiRouter.post('/audio/speech', async (req: Request, res: Response) => {
+  const start = Date.now();
+  const body = req.body as { model?: string; [key: string]: unknown };
+  const requestId = `audiospeech-${uuid().replace(/-/g, '').slice(0, 24)}`;
+
+  if (!body.model) {
+    res.status(400).json({ error: { message: 'model is required', type: 'invalid_request_error' } });
+    return;
+  }
+
+  const resolved = resolveProvider(body.model);
+  if (!resolved) {
+    res.status(404).json({ error: { message: `No provider found for model: ${body.model}`, type: 'model_not_found' } });
+    return;
+  }
+
+  const { config, resolvedModel } = resolved;
+  if (!supportsOpenAIJsonEndpoint(config)) {
+    const message = `${config.type} provider does not support OpenAI-compatible audio.speech.`;
+    res.status(400).json({ error: { message, type: 'unsupported_endpoint' } });
+    return;
+  }
+
+  try {
+    const upstream = await postOpenAIBinary(config, 'audio/speech', { ...body, model: resolvedModel });
+    if (!upstream.ok) {
+      res.status(upstream.status).type('application/json').send(upstream.text);
+      logRequest({ id: requestId, provider_id: config.id, model: resolvedModel, endpoint: 'audio.speech', status: upstream.status, latency: Date.now() - start, error: upstream.text.slice(0, 500), gateway_key_id: requestGatewayKeyId(req), req_body: body });
+      return;
+    }
+    res.type(upstream.contentType).send(upstream.data);
+    logRequest({ id: requestId, provider_id: config.id, model: resolvedModel, endpoint: 'audio.speech', status: 200, latency: Date.now() - start, gateway_key_id: requestGatewayKeyId(req), req_body: body, res_body: { bytes: upstream.data.length, contentType: upstream.contentType } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: { message: msg, type: 'api_error' } });
+    logRequest({ id: requestId, provider_id: config.id, model: resolvedModel, endpoint: 'audio.speech', status: 500, latency: Date.now() - start, error: msg, gateway_key_id: requestGatewayKeyId(req), req_body: body });
+  }
 });
 
 // POST /v1/chat/completions

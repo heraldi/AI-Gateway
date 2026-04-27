@@ -11,6 +11,7 @@ import { PerplexityWebAdapter } from './adapters/perplexity-web.js';
 import { GeminiCliAdapter, AntigravityAdapter } from './adapters/cloudcode.js';
 import { CodexAdapter } from './adapters/codex.js';
 import { CursorAdapter, KiroAdapter } from './adapters/not-ported.js';
+import { classifyModelCapability } from './capabilities.js';
 
 const ADAPTERS: Record<ProviderType, ProviderAdapter> = {
   'anthropic': AnthropicAdapter,
@@ -303,6 +304,7 @@ export async function fetchAllModels(): Promise<FetchModelsResult> {
                 ...m,
                 id: alias.alias,
                 name: alias.alias,
+                capability: m.capability ?? classifyModelCapability(alias.alias, m.owned_by),
                 source_id: m.id,
                 alias_of: m.id,
                 provider_id: p.id,
@@ -310,7 +312,7 @@ export async function fetchAllModels(): Promise<FetchModelsResult> {
               });
             }
           } else {
-            models.push({ ...m, source_id: m.id, provider_id: p.id, provider_name: p.name });
+            models.push({ ...m, capability: m.capability ?? classifyModelCapability(m.id, m.owned_by), source_id: m.id, provider_id: p.id, provider_name: p.name });
           }
 
           for (const alias of forkedAliases) {
@@ -318,6 +320,7 @@ export async function fetchAllModels(): Promise<FetchModelsResult> {
               ...m,
               id: alias.alias,
               name: alias.alias,
+              capability: m.capability ?? classifyModelCapability(alias.alias, m.owned_by),
               source_id: m.id,
               alias_of: m.id,
               forked_alias: true,

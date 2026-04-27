@@ -4,6 +4,8 @@ import { db, getSetting, setSetting } from '../db/index.js';
 import { hashApiKey } from '../middleware/auth.js';
 import { fetchAllModels, resolveProvider, resolveByProvider } from '../providers/registry.js';
 import type { Provider, GatewayKey, RequestLog, ModelAlias } from '../db/index.js';
+import { classifyModelCapability } from '../providers/capabilities.js';
+import { postOpenAIBinary, postOpenAIJson, supportsOpenAIJsonEndpoint } from '../providers/adapters/openai.js';
 
 export const adminRouter = Router();
 
@@ -150,14 +152,28 @@ adminRouter.delete('/providers/:id', (req, res) => {
 // ─── Cookie update (from Chrome extension) ─────────────────────────────────────
 
 adminRouter.post('/providers/:id/cookies', (req, res) => {
-  const p = db.prepare('SELECT id FROM providers WHERE id = ?').get(req.params.id) as { id: string } | undefined;
+  const p = db.prepare('SELECT id, type, extra_headers FROM providers WHERE id = ?').get(req.params.id) as { id: string; type: string; extra_headers: string | null } | undefined;
   if (!p) { res.status(404).json({ error: 'Not found' }); return; }
 
   const { cookies } = req.body as { cookies: Record<string, string> };
   if (!cookies || typeof cookies !== 'object') { res.status(400).json({ error: 'cookies object required' }); return; }
 
-  db.prepare('UPDATE providers SET cookies = ?, updated_at = ? WHERE id = ?')
-    .run(JSON.stringify(cookies), Date.now(), req.params.id);
+  const extraHeaders = (() => {
+    try {
+      return p.extra_headers ? JSON.parse(p.extra_headers) as Record<string, string> : {};
+    } catch {
+      return {};
+    }
+  })();
+  if (p.type === 'bud-web') {
+    if (cookies.bud_projectid) extraHeaders['X-Bud-ProjectId'] = cookies.bud_projectid;
+    if (cookies.bud_userid) extraHeaders['X-Bud-UserId'] = cookies.bud_userid;
+    if (cookies.bud_chatsessionid) extraHeaders['X-Bud-ChatSessionId'] = cookies.bud_chatsessionid;
+    if (cookies.bud_template) extraHeaders['X-Bud-Template'] = cookies.bud_template;
+  }
+
+  db.prepare('UPDATE providers SET cookies = ?, extra_headers = ?, updated_at = ? WHERE id = ?')
+    .run(JSON.stringify(cookies), Object.keys(extraHeaders).length ? JSON.stringify(extraHeaders) : p.extra_headers, Date.now(), req.params.id);
   res.json({ ok: true, message: 'Cookies updated successfully' });
 });
 
@@ -349,19 +365,98 @@ adminRouter.post('/models/test', async (req, res) => {
   if (!resolved) { res.status(404).json({ error: `No provider found for model: ${model}` }); return; }
 
   const { adapter, config, resolvedModel } = resolved;
-  if (model.startsWith('grok-imagine-')) {
+  const capability = classifyModelCapability(resolvedModel);
+  if (capability !== 'chat' && !supportsOpenAIJsonEndpoint(config)) {
     res.json({
       ok: false,
       model,
       resolvedModel,
+      capability,
       provider: { id: config.id, name: config.name, type: config.type },
       latency: Date.now() - startedAt,
-      error: 'This is an xAI image/video model, not a chat completion model. Use a Grok chat model such as grok-3, grok-4-0709, grok-4-fast-reasoning, or grok-code-fast-1.',
+      error: `${config.type} adapter is chat-only for dashboard tests. ${capability} models require an OpenAI-compatible provider endpoint.`,
     });
     return;
   }
 
   try {
+    if (capability === 'embedding') {
+      const upstream = await postOpenAIJson(config, 'embeddings', {
+        model: resolvedModel,
+        input: prompt || 'OK',
+      });
+      if (!upstream.ok) throw new Error(`OpenAI-compatible embeddings error ${upstream.status}: ${upstream.text}`);
+      const data = upstream.data as { data?: { embedding?: unknown[] }[]; usage?: { prompt_tokens?: number; total_tokens?: number } };
+      const dimensions = Array.isArray(data.data?.[0]?.embedding) ? data.data?.[0]?.embedding?.length ?? 0 : 0;
+      res.json({
+        ok: true,
+        model,
+        resolvedModel,
+        capability,
+        provider: { id: config.id, name: config.name, type: config.type },
+        latency: Date.now() - startedAt,
+        content: `Embedding OK${dimensions ? ` (${dimensions} dimensions)` : ''}`,
+        usage: {
+          input_tokens: data.usage?.prompt_tokens ?? data.usage?.total_tokens ?? 0,
+          output_tokens: 0,
+          total_tokens: data.usage?.total_tokens ?? data.usage?.prompt_tokens ?? 0,
+        },
+      });
+      return;
+    }
+
+    if (capability === 'image') {
+      const upstream = await postOpenAIJson(config, 'images/generations', {
+        model: resolvedModel,
+        prompt: prompt || 'A minimal test image with the text OK',
+        n: 1,
+      });
+      if (!upstream.ok) throw new Error(`OpenAI-compatible image generation error ${upstream.status}: ${upstream.text}`);
+      const data = upstream.data as { data?: unknown[] };
+      res.json({
+        ok: true,
+        model,
+        resolvedModel,
+        capability,
+        provider: { id: config.id, name: config.name, type: config.type },
+        latency: Date.now() - startedAt,
+        content: `Image generation OK (${data.data?.length ?? 0} result${(data.data?.length ?? 0) === 1 ? '' : 's'})`,
+      });
+      return;
+    }
+
+    if (capability === 'tts') {
+      const upstream = await postOpenAIBinary(config, 'audio/speech', {
+        model: resolvedModel,
+        input: prompt || 'OK',
+        voice: 'alloy',
+      });
+      if (!upstream.ok) throw new Error(`OpenAI-compatible audio speech error ${upstream.status}: ${upstream.text}`);
+      res.json({
+        ok: true,
+        model,
+        resolvedModel,
+        capability,
+        provider: { id: config.id, name: config.name, type: config.type },
+        latency: Date.now() - startedAt,
+        content: `TTS OK (${upstream.data.length} bytes, ${upstream.contentType})`,
+      });
+      return;
+    }
+
+    if (capability !== 'chat') {
+      res.json({
+        ok: false,
+        model,
+        resolvedModel,
+        capability,
+        provider: { id: config.id, name: config.name, type: config.type },
+        latency: Date.now() - startedAt,
+        error: `${capability} model test is classified correctly, but this gateway does not have a standardized test request for that endpoint yet.`,
+      });
+      return;
+    }
+
     const result = await adapter.complete(config, {
       model: resolvedModel,
       messages: [{ role: 'user', content: prompt || 'Reply with a short OK if this model is working.' }],
@@ -372,6 +467,7 @@ adminRouter.post('/models/test', async (req, res) => {
       ok: true,
       model,
       resolvedModel,
+      capability,
       provider: { id: config.id, name: config.name, type: config.type },
       latency: Date.now() - startedAt,
       content: result.content,
@@ -386,6 +482,7 @@ adminRouter.post('/models/test', async (req, res) => {
       ok: false,
       model,
       resolvedModel,
+      capability,
       provider: { id: config.id, name: config.name, type: config.type },
       latency: Date.now() - startedAt,
       error: err instanceof Error ? err.message : String(err),

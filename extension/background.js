@@ -22,40 +22,95 @@ async function extractBudAuthFromTab(tabId, tabUrl) {
     return {};
   }
 
-  try {
-    const [injection] = await chrome.scripting.executeScript({
-      target: { tabId },
-      world: 'MAIN',
-      func: async () => {
-        const out = {};
-        const looksJwt = value => typeof value === 'string' && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
-        const rememberToken = value => {
-          if (looksJwt(value) && !out.__clerk_bearer) out.__clerk_bearer = value;
-        };
+	try {
+	  const [injection] = await chrome.scripting.executeScript({
+	    target: { tabId },
+	    world: 'MAIN',
+	    func: async () => {
+	      const out = {};
+	      const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+	      const looksJwt = value => typeof value === 'string' && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
+	      const rememberToken = value => {
+	        if (looksJwt(value) && !out.__clerk_bearer) out.__clerk_bearer = value;
+	      };
+	      const rememberProjectId = value => {
+	        if (typeof value === 'string' && uuidRe.test(value) && !out.bud_projectid) out.bud_projectid = value;
+	      };
+	      const rememberUserId = value => {
+	        if (typeof value === 'string' && /^user_[A-Za-z0-9]+$/.test(value) && !out.bud_userid) out.bud_userid = value;
+	      };
+	      const rememberChatSessionId = value => {
+	        if ((typeof value === 'string' || typeof value === 'number') && /^\d+$/.test(String(value)) && !out.bud_chatsessionid) {
+	          out.bud_chatsessionid = String(value);
+	        }
+	      };
+	      const scanUrl = href => {
+	        try {
+	          const url = new URL(href, location.href);
+	          for (const part of url.pathname.split('/')) rememberProjectId(part);
+	          rememberChatSessionId(url.searchParams.get('chatSessionId'));
+	        } catch {}
+	      };
+	      const scanNode = node => {
+	        if (node == null) return;
+	        if (typeof node === 'string') {
+	          rememberProjectId(node);
+	          rememberUserId(node);
+	          return;
+	        }
+	        if (Array.isArray(node)) {
+	          node.forEach(scanNode);
+	          return;
+	        }
+	        if (typeof node === 'object') {
+	          for (const [key, value] of Object.entries(node)) {
+	            const lower = key.toLowerCase();
+	            if (lower === 'projectid' || lower === 'project_id') rememberProjectId(value);
+	            if (lower === 'userid' || lower === 'user_id') rememberUserId(value);
+	            if (lower === 'chatsessionid' || lower === 'chat_session_id') rememberChatSessionId(value);
+	            scanNode(value);
+	          }
+	        }
+	      };
+	      const scanStoredValue = value => {
+	        if (!value) return;
+	        rememberToken(value);
+	        scanNode(value);
+	        try { scanNode(JSON.parse(value)); } catch {}
+	      };
+	
+	      scanUrl(location.href);
+	      try {
+	        for (const entry of performance.getEntriesByType('resource')) {
+	          if (typeof entry.name === 'string' && /bud|orchids|messages|chat-sessions/i.test(entry.name)) scanUrl(entry.name);
+	        }
+	      } catch {}
 
-        try {
-          const clerk = window.Clerk;
-          const token =
-            await clerk?.session?.getToken?.() ||
-            await clerk?.client?.sessions?.[0]?.getToken?.();
-          rememberToken(token);
-        } catch {}
+	      try {
+	        const clerk = window.Clerk;
+	        const token =
+	          await clerk?.session?.getToken?.() ||
+	          await clerk?.client?.sessions?.[0]?.getToken?.();
+	        rememberToken(token);
+	        const user = clerk?.user;
+	        rememberUserId(user?.id);
+	      } catch {}
 
-        for (const storage of [window.localStorage, window.sessionStorage]) {
-          try {
-            for (let i = 0; i < storage.length; i += 1) {
-              const key = storage.key(i);
-              if (!key) continue;
-              const value = storage.getItem(key);
-              if (!value) continue;
-              const lower = key.toLowerCase();
-              if (lower.includes('clerk') || lower.includes('token') || lower.includes('session')) {
-                rememberToken(value);
-                out[`storage_${key}`] = value;
-              }
-            }
-          } catch {}
-        }
+	      for (const storage of [window.localStorage, window.sessionStorage]) {
+	        try {
+	          for (let i = 0; i < storage.length; i += 1) {
+	            const key = storage.key(i);
+	            if (!key) continue;
+	            const value = storage.getItem(key);
+	            if (!value) continue;
+	            const lower = key.toLowerCase();
+	            if (lower.includes('bud') || lower.includes('project') || lower.includes('user') || lower.includes('chat') || lower.includes('clerk') || lower.includes('token') || lower.includes('session')) {
+	              scanStoredValue(value);
+	              out[`storage_${key}`] = value;
+	            }
+	          }
+	        } catch {}
+	      }
 
         return out;
       },

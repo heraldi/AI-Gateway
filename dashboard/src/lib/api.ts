@@ -75,9 +75,21 @@ export type Stats = {
 
 export type ModelInfo = {
   id: string; name: string; owned_by?: string;
+  capability?: ModelCapability;
   context_length?: number; provider_id: string; provider_name: string;
   source_id?: string; alias_of?: string; forked_alias?: boolean;
 };
+
+export type ModelCapability =
+  | 'chat'
+  | 'embedding'
+  | 'image'
+  | 'tts'
+  | 'transcription'
+  | 'video'
+  | 'rerank'
+  | 'moderation'
+  | 'unknown';
 
 export type ModelsResult = {
   models: ModelInfo[];
@@ -89,6 +101,7 @@ export type ModelTestResult = {
   model: string;
   resolvedModel: string;
   provider: { id: string; name: string; type: string };
+  capability?: ModelCapability;
   latency: number;
   content?: string;
   error?: string;

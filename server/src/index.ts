@@ -75,15 +75,34 @@ app.post("/ext/cookies/:providerId", (req, res) => {
   // Dynamic import to avoid circular — just use db directly
   import("./db/index.js").then(({ db }) => {
     const p = db
-      .prepare("SELECT id FROM providers WHERE id = ?")
-      .get(req.params.providerId);
+      .prepare("SELECT id, type, extra_headers FROM providers WHERE id = ?")
+      .get(req.params.providerId) as { id: string; type: string; extra_headers: string | null } | undefined;
     if (!p) {
       res.status(404).json({ error: "Provider not found" });
       return;
     }
+    const extraHeaders = (() => {
+      try {
+        return p.extra_headers ? JSON.parse(p.extra_headers) as Record<string, string> : {};
+      } catch {
+        return {};
+      }
+    })();
+    if (p.type === "bud-web") {
+      if (cookies.bud_projectid) extraHeaders["X-Bud-ProjectId"] = cookies.bud_projectid;
+      if (cookies.bud_userid) extraHeaders["X-Bud-UserId"] = cookies.bud_userid;
+      if (cookies.bud_chatsessionid) extraHeaders["X-Bud-ChatSessionId"] = cookies.bud_chatsessionid;
+      if (cookies.bud_template) extraHeaders["X-Bud-Template"] = cookies.bud_template;
+    }
+
     db.prepare(
-      "UPDATE providers SET cookies = ?, updated_at = ? WHERE id = ?",
-    ).run(JSON.stringify(cookies), Date.now(), req.params.providerId);
+      "UPDATE providers SET cookies = ?, extra_headers = ?, updated_at = ? WHERE id = ?",
+    ).run(
+      JSON.stringify(cookies),
+      Object.keys(extraHeaders).length ? JSON.stringify(extraHeaders) : p.extra_headers,
+      Date.now(),
+      req.params.providerId,
+    );
     res.json({ ok: true });
   });
 });

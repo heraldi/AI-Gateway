@@ -1,8 +1,20 @@
 import { useEffect, useState } from 'react';
 import { RefreshCw, Plus, Trash2, AlertCircle, Play, CheckCircle2, XCircle, Edit2, Check, X } from 'lucide-react';
-import { api, type ModelInfo, type ModelRoute, type ModelTestResult, type Provider, type ModelAlias } from '../lib/api';
+import { api, type ModelCapability, type ModelInfo, type ModelRoute, type ModelTestResult, type Provider, type ModelAlias } from '../lib/api';
 
 type FetchError = { provider_id: string; provider_name: string; error: string };
+
+const CAPABILITY_BADGES: Record<ModelCapability, string> = {
+  chat: 'badge-green',
+  embedding: 'badge-blue',
+  image: 'badge-yellow',
+  tts: 'badge-blue',
+  transcription: 'badge-gray',
+  video: 'badge-yellow',
+  rerank: 'badge-gray',
+  moderation: 'badge-gray',
+  unknown: 'badge-gray',
+};
 
 export default function ModelsPage() {
   const [models, setModels]       = useState<ModelInfo[]>([]);
@@ -60,6 +72,10 @@ export default function ModelsPage() {
 
   function upstreamModel(m: ModelInfo) {
     return m.source_id ?? m.alias_of ?? m.id;
+  }
+
+  function capabilityOf(m: ModelInfo): ModelCapability {
+    return m.capability ?? 'chat';
   }
 
   function findAlias(m: ModelInfo) {
@@ -129,6 +145,11 @@ export default function ModelsPage() {
   const grouped = models.reduce<Record<string, ModelInfo[]>>((acc, m) => {
     const k = m.provider_name;
     (acc[k] ??= []).push(m);
+    return acc;
+  }, {});
+  const capabilityCounts = models.reduce<Record<string, number>>((acc, m) => {
+    const key = m.capability ?? 'chat';
+    acc[key] = (acc[key] ?? 0) + 1;
     return acc;
   }, {});
 
@@ -219,8 +240,11 @@ export default function ModelsPage() {
                   <span className={testResult.ok ? 'text-success font-medium' : 'text-danger font-medium'}>
                     {testResult.ok ? 'OK' : 'Failed'}
                   </span>
-                  <span className="text-muted">provider: {testResult.provider.name} ({testResult.provider.type})</span>
-                  <span className="text-muted">latency: {testResult.latency}ms</span>
+	                  <span className="text-muted">provider: {testResult.provider.name} ({testResult.provider.type})</span>
+	                  {testResult.capability && (
+	                    <span className={CAPABILITY_BADGES[testResult.capability]}>{testResult.capability}</span>
+	                  )}
+	                  <span className="text-muted">latency: {testResult.latency}ms</span>
                   {testResult.resolvedModel !== testResult.model && (
                     <span className="text-muted">resolved: {testResult.resolvedModel}</span>
                   )}
@@ -269,10 +293,11 @@ export default function ModelsPage() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
               {pModels.map(m => {
                 const key = aliasKey(m);
-                const editing = aliasEditingKey === key;
-                const existingAlias = findAlias(m);
-                const upstream = upstreamModel(m);
-                return (
+	                const editing = aliasEditingKey === key;
+	                const existingAlias = findAlias(m);
+	                const upstream = upstreamModel(m);
+	                const capability = capabilityOf(m);
+	                return (
                   <div key={`${m.provider_id}:${m.id}`} className="bg-base-700 rounded px-3 py-1.5 min-w-0 space-y-1">
                     <div className="flex items-center gap-2 min-w-0">
                       <div className="flex-1 min-w-0">
@@ -281,7 +306,8 @@ export default function ModelsPage() {
                           <span className="text-[11px] text-muted font-mono block truncate">upstream: {m.alias_of}</span>
                         )}
                       </div>
-                      {m.owned_by && <span className="text-xs text-muted flex-shrink-0">{m.owned_by}</span>}
+	                      <span className={`${CAPABILITY_BADGES[capability]} flex-shrink-0`}>{capability}</span>
+	                      {m.owned_by && <span className="text-xs text-muted flex-shrink-0">{m.owned_by}</span>}
                       <button
                         className="btn-ghost p-1 flex-shrink-0"
                         title="Rename model"
@@ -291,7 +317,7 @@ export default function ModelsPage() {
                       </button>
                       <button
                         className="btn-ghost p-1 flex-shrink-0"
-                        title="Test model"
+	                        title={`Test ${capability} model`}
                         disabled={!!testingModel}
                         onClick={() => testModel(m.id, m.provider_id)}
                       >
@@ -369,12 +395,21 @@ export default function ModelsPage() {
             </div>
           </div>
         </div>
-        <div className="card space-y-2">
-          <h3 className="text-sm font-medium">Alias Rules</h3>
-          <p className="text-xs text-muted">Rename creates a client-visible alias that routes to the selected upstream model.</p>
-          <p className="text-xs text-muted">Enable `keep` to show both original and alias in model lists.</p>
-        </div>
-      </aside>
+	        <div className="card space-y-2">
+	          <h3 className="text-sm font-medium">Alias Rules</h3>
+	          <p className="text-xs text-muted">Rename creates a client-visible alias that routes to the selected upstream model.</p>
+	          <p className="text-xs text-muted">Enable `keep` to show both original and alias in model lists.</p>
+	        </div>
+	        <div className="card space-y-2">
+	          <h3 className="text-sm font-medium">Capabilities</h3>
+	          {Object.entries(capabilityCounts).map(([capability, count]) => (
+	            <div key={capability} className="flex items-center justify-between text-xs">
+	              <span className={CAPABILITY_BADGES[(capability as ModelCapability) ?? 'unknown'] ?? 'badge-gray'}>{capability}</span>
+	              <span className="text-muted">{count}</span>
+	            </div>
+	          ))}
+	        </div>
+	      </aside>
     </div>
   );
 }
