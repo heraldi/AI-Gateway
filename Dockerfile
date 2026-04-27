@@ -23,7 +23,7 @@ ENV NODE_ENV=production
 
 # Server runtime deps
 COPY server/package*.json ./
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 
 # Compiled server
 COPY --from=server-build /app/server/dist ./dist
