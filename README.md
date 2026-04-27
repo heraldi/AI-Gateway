@@ -328,38 +328,6 @@ This is required for:
 - `Bud Web`
 - `Devin Web`
 
-## Bud Web Notes
-
-Bud uses a website session rather than a public OpenAI-compatible base URL for this integration.
-
-The Bud adapter can:
-
-- list Bud-supported models
-- run prompts through the Bud web backend
-
-The adapter may require provider-specific metadata such as:
-
-- `X-Bud-ProjectId`
-- `X-Bud-UserId`
-- `X-Bud-ChatSessionId`
-- `X-Bud-Template`
-
-These values can be stored in provider `extra_headers` from the dashboard.
-
-## Devin Web Notes
-
-Devin also uses a provider-specific web adapter.
-
-The Devin adapter may require:
-
-- session cookies
-- a bearer token extracted from browser storage
-- `X-Devin-OrgId`
-- `X-Devin-UserId`
-- `X-Devin-Username`
-
-This is why Devin is configured as `Devin Web` instead of a plain OpenAI-compatible provider.
-
 ## Model Aliases
 
 AI Gateway supports client-facing model aliases.
@@ -467,3 +435,4 @@ The provider may list the model but still reject chat calls for that account, re
 - The Docker Compose path uses the repository root `.env`
 - Bud and Devin support is adapter-based, not generic OpenAI compatibility
 - Some OAuth providers depend on their current vendor flow and may change over time
+
