@@ -246,7 +246,7 @@ app.post("/ext/cookies/:providerId", (req, res) => {
 
 // ─── Static dashboard ─────────────────────────────────────────────────────────
 
-const dashboardDist = join(__dirname, "../../dashboard/dist");
+const dashboardDist = join(__dirname, "../dashboard/dist");
 app.use(express.static(dashboardDist));
 app.get("*", (_req, res) => {
   res.sendFile(join(dashboardDist, "index.html"), (err) => {
