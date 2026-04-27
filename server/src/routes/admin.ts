@@ -2,7 +2,9 @@ import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
 import { db, getSetting, setSetting } from '../db/index.js';
 import { hashApiKey } from '../middleware/auth.js';
+import { logRequest } from '../middleware/logger.js';
 import { fetchAllModels, resolveProvider, resolveByProvider } from '../providers/registry.js';
+import type { NormalizedRequest } from '../providers/types.js';
 import type { Provider, ProviderAccount, GatewayKey, RequestLog, ModelAlias } from '../db/index.js';
 import { classifyModelCapability } from '../providers/capabilities.js';
 import { postOpenAIBinary, postOpenAIJson, supportsOpenAIJsonEndpoint } from '../providers/adapters/openai.js';
@@ -323,10 +325,6 @@ adminRouter.post('/model-aliases', (req, res) => {
     res.status(400).json({ error: 'alias, provider_id, and upstream_model are required' });
     return;
   }
-  if (cleanAlias === cleanModel) {
-    res.status(400).json({ error: 'alias must be different from upstream_model' });
-    return;
-  }
   const provider = db.prepare('SELECT id FROM providers WHERE id = ?').get(provider_id) as { id: string } | undefined;
   if (!provider) { res.status(404).json({ error: 'provider not found' }); return; }
 
@@ -351,8 +349,6 @@ adminRouter.put('/model-aliases/:id', (req, res) => {
   const cleanAlias = typeof alias === 'string' ? alias.trim() : row.alias;
   const cleanModel = typeof upstream_model === 'string' ? upstream_model.trim() : row.upstream_model;
   if (!cleanAlias || !cleanModel) { res.status(400).json({ error: 'alias and upstream_model are required' }); return; }
-  if (cleanAlias === cleanModel) { res.status(400).json({ error: 'alias must be different from upstream_model' }); return; }
-
   try {
     db.prepare(`
       UPDATE model_aliases SET alias = ?, provider_id = ?, upstream_model = ?, fork = ?, updated_at = ?
@@ -458,6 +454,7 @@ adminRouter.get('/models', async (_req, res) => {
 
 adminRouter.post('/models/test', async (req, res) => {
   const startedAt = Date.now();
+  const requestId = `modeltest-${uuid().replace(/-/g, '').slice(0, 24)}`;
   const { model, prompt, provider_id } = req.body as { model?: string; prompt?: string; provider_id?: string };
   if (!model) { res.status(400).json({ error: 'model is required' }); return; }
 
@@ -468,6 +465,17 @@ adminRouter.post('/models/test', async (req, res) => {
   const { adapter, config, resolvedModel } = resolved;
   const capability = classifyModelCapability(resolvedModel);
   if (capability !== 'chat' && !supportsOpenAIJsonEndpoint(config)) {
+    const error = `${config.type} adapter is chat-only for dashboard tests. ${capability} models require an OpenAI-compatible provider endpoint.`;
+    logRequest({
+      id: requestId,
+      provider_id: config.id,
+      model: resolvedModel,
+      endpoint: 'models.test',
+      status: 400,
+      latency: Date.now() - startedAt,
+      error,
+      req_body: { model, prompt, provider_id },
+    });
     res.json({
       ok: false,
       model,
@@ -475,21 +483,29 @@ adminRouter.post('/models/test', async (req, res) => {
       capability,
       provider: { id: config.id, name: config.name, type: config.type },
       latency: Date.now() - startedAt,
-      error: `${config.type} adapter is chat-only for dashboard tests. ${capability} models require an OpenAI-compatible provider endpoint.`,
+      error,
     });
     return;
   }
 
   try {
     if (capability === 'embedding') {
-      const upstream = await postOpenAIJson(config, 'embeddings', {
+      const requestBody = {
         model: resolvedModel,
         input: prompt || 'OK',
+      };
+      const upstream = await postOpenAIJson(config, 'embeddings', {
+        ...requestBody,
       });
       if (!upstream.ok) throw new Error(`OpenAI-compatible embeddings error ${upstream.status}: ${upstream.text}`);
       const data = upstream.data as { data?: { embedding?: unknown[] }[]; usage?: { prompt_tokens?: number; total_tokens?: number } };
       const dimensions = Array.isArray(data.data?.[0]?.embedding) ? data.data?.[0]?.embedding?.length ?? 0 : 0;
-      res.json({
+      const usage = {
+        input_tokens: data.usage?.prompt_tokens ?? data.usage?.total_tokens ?? 0,
+        output_tokens: 0,
+        total_tokens: data.usage?.total_tokens ?? data.usage?.prompt_tokens ?? 0,
+      };
+      const responseBody = {
         ok: true,
         model,
         resolvedModel,
@@ -497,24 +513,34 @@ adminRouter.post('/models/test', async (req, res) => {
         provider: { id: config.id, name: config.name, type: config.type },
         latency: Date.now() - startedAt,
         content: `Embedding OK${dimensions ? ` (${dimensions} dimensions)` : ''}`,
-        usage: {
-          input_tokens: data.usage?.prompt_tokens ?? data.usage?.total_tokens ?? 0,
-          output_tokens: 0,
-          total_tokens: data.usage?.total_tokens ?? data.usage?.prompt_tokens ?? 0,
-        },
+        usage,
+      };
+      logRequest({
+        id: requestId,
+        provider_id: config.id,
+        model: resolvedModel,
+        endpoint: 'models.test.embeddings',
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        status: 200,
+        latency: Date.now() - startedAt,
+        req_body: requestBody,
+        res_body: responseBody,
       });
+      res.json(responseBody);
       return;
     }
 
     if (capability === 'image') {
-      const upstream = await postOpenAIJson(config, 'images/generations', {
+      const requestBody = {
         model: resolvedModel,
         prompt: prompt || 'A minimal test image with the text OK',
         n: 1,
-      });
+      };
+      const upstream = await postOpenAIJson(config, 'images/generations', requestBody);
       if (!upstream.ok) throw new Error(`OpenAI-compatible image generation error ${upstream.status}: ${upstream.text}`);
       const data = upstream.data as { data?: unknown[] };
-      res.json({
+      const responseBody = {
         ok: true,
         model,
         resolvedModel,
@@ -522,18 +548,30 @@ adminRouter.post('/models/test', async (req, res) => {
         provider: { id: config.id, name: config.name, type: config.type },
         latency: Date.now() - startedAt,
         content: `Image generation OK (${data.data?.length ?? 0} result${(data.data?.length ?? 0) === 1 ? '' : 's'})`,
+      };
+      logRequest({
+        id: requestId,
+        provider_id: config.id,
+        model: resolvedModel,
+        endpoint: 'models.test.images',
+        status: 200,
+        latency: Date.now() - startedAt,
+        req_body: requestBody,
+        res_body: responseBody,
       });
+      res.json(responseBody);
       return;
     }
 
     if (capability === 'tts') {
-      const upstream = await postOpenAIBinary(config, 'audio/speech', {
+      const requestBody = {
         model: resolvedModel,
         input: prompt || 'OK',
         voice: 'alloy',
-      });
+      };
+      const upstream = await postOpenAIBinary(config, 'audio/speech', requestBody);
       if (!upstream.ok) throw new Error(`OpenAI-compatible audio speech error ${upstream.status}: ${upstream.text}`);
-      res.json({
+      const responseBody = {
         ok: true,
         model,
         resolvedModel,
@@ -541,11 +579,33 @@ adminRouter.post('/models/test', async (req, res) => {
         provider: { id: config.id, name: config.name, type: config.type },
         latency: Date.now() - startedAt,
         content: `TTS OK (${upstream.data.length} bytes, ${upstream.contentType})`,
+      };
+      logRequest({
+        id: requestId,
+        provider_id: config.id,
+        model: resolvedModel,
+        endpoint: 'models.test.audio.speech',
+        status: 200,
+        latency: Date.now() - startedAt,
+        req_body: requestBody,
+        res_body: responseBody,
       });
+      res.json(responseBody);
       return;
     }
 
     if (capability !== 'chat') {
+      const error = `${capability} model test is classified correctly, but this gateway does not have a standardized test request for that endpoint yet.`;
+      logRequest({
+        id: requestId,
+        provider_id: config.id,
+        model: resolvedModel,
+        endpoint: 'models.test',
+        status: 400,
+        latency: Date.now() - startedAt,
+        error,
+        req_body: { model, prompt, provider_id },
+      });
       res.json({
         ok: false,
         model,
@@ -553,18 +613,19 @@ adminRouter.post('/models/test', async (req, res) => {
         capability,
         provider: { id: config.id, name: config.name, type: config.type },
         latency: Date.now() - startedAt,
-        error: `${capability} model test is classified correctly, but this gateway does not have a standardized test request for that endpoint yet.`,
+        error,
       });
       return;
     }
 
-    const result = await adapter.complete(config, {
+    const requestBody: NormalizedRequest = {
       model: resolvedModel,
       messages: [{ role: 'user', content: prompt || 'Reply with a short OK if this model is working.' }],
       max_tokens: 128,
       temperature: 0.2,
-    });
-    res.json({
+    };
+    const result = await adapter.complete(config, requestBody);
+    const responseBody = {
       ok: true,
       model,
       resolvedModel,
@@ -577,16 +638,42 @@ adminRouter.post('/models/test', async (req, res) => {
         output_tokens: result.output_tokens,
         total_tokens: result.input_tokens + result.output_tokens,
       },
+    };
+    logRequest({
+      id: requestId,
+      provider_id: config.id,
+      model: resolvedModel,
+      endpoint: 'models.test.chat',
+      input_tokens: result.input_tokens,
+      output_tokens: result.output_tokens,
+      status: 200,
+      latency: Date.now() - startedAt,
+      req_body: requestBody,
+      res_body: { content: result.content.slice(0, 500) },
     });
+    res.json(responseBody);
   } catch (err) {
-    res.status(200).json({
+    const error = err instanceof Error ? err.message : String(err);
+    const responseBody = {
       ok: false,
       model,
       resolvedModel,
       capability,
       provider: { id: config.id, name: config.name, type: config.type },
       latency: Date.now() - startedAt,
-      error: err instanceof Error ? err.message : String(err),
+      error,
+    };
+    logRequest({
+      id: requestId,
+      provider_id: config.id,
+      model: resolvedModel,
+      endpoint: `models.test.${capability}`,
+      status: 500,
+      latency: Date.now() - startedAt,
+      error,
+      req_body: { model, prompt, provider_id },
+      res_body: responseBody,
     });
+    res.status(200).json(responseBody);
   }
 });

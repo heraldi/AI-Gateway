@@ -29,10 +29,14 @@ export default function ModelsPage() {
   const [testPrompt, setTestPrompt] = useState('Reply with a short OK if this model is working.');
   const [testingModel, setTestingModel] = useState('');
   const [testingProvider, setTestingProvider] = useState('');
-  const [testResult, setTestResult] = useState<ModelTestResult | null>(null);
+  const [testResultsByKey, setTestResultsByKey] = useState<Record<string, ModelTestResult>>({});
   const [aliasEditingKey, setAliasEditingKey] = useState('');
   const [aliasValue, setAliasValue] = useState('');
   const [aliasFork, setAliasFork] = useState(false);
+  const [manualProvider, setManualProvider] = useState('');
+  const [manualModel, setManualModel] = useState('');
+  const [manualAlias, setManualAlias] = useState('');
+  const [manualFork, setManualFork] = useState(false);
 
   const loadModels = async () => {
     setLoading(true);
@@ -117,28 +121,82 @@ export default function ModelsPage() {
   }
 
   async function testModel(model: string, providerId?: string) {
+    const key = `${providerId ?? 'auto'}:${model}`;
     const providerName = providerId
       ? (providers.find(p => p.id === providerId)?.name ?? '')
       : '';
     setTestingModel(model);
     setTestingProvider(providerName);
-    setTestResult(null);
+    setTestResultsByKey(prev => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
     try {
       const result = await api.models.test({ model, prompt: testPrompt, provider_id: providerId });
-      setTestResult(result);
+      setTestResultsByKey(prev => ({ ...prev, [key]: result }));
     } catch (e) {
-      setTestResult({
+      setTestResultsByKey(prev => ({ ...prev, [key]: {
         ok: false,
         model,
         resolvedModel: model,
         provider: { id: providerId ?? '', name: providerName || 'Gateway', type: '' },
         latency: 0,
         error: String(e),
-      });
+      } }));
     } finally {
       setTestingModel('');
       setTestingProvider('');
     }
+  }
+
+  async function addManualModel() {
+    const upstream = manualModel.trim();
+    const alias = (manualAlias.trim() || upstream);
+    if (!manualProvider || !upstream || !alias) return;
+    await api.aliases.create({
+      provider_id: manualProvider,
+      upstream_model: upstream,
+      alias,
+      fork: manualFork,
+    });
+    setManualModel('');
+    setManualAlias('');
+    setManualFork(false);
+    await loadAliases();
+    await loadModels();
+  }
+
+  function renderTestResult(result: ModelTestResult) {
+    const detail = result.ok ? result.content : result.error;
+    const showDetail = !!detail && (!result.ok || !/^ok[.!]?$/i.test(detail.trim()));
+    return (
+      <div className={`border rounded px-3 py-2 ${result.ok ? 'bg-success/10 border-success/20' : 'bg-danger/10 border-danger/20'}`}>
+        <div className="flex items-start gap-2">
+          {result.ok
+            ? <CheckCircle2 size={14} className="text-success mt-0.5 flex-shrink-0" />
+            : <XCircle size={14} className="text-danger mt-0.5 flex-shrink-0" />}
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+              <span className={result.ok ? 'text-success font-medium' : 'text-danger font-medium'}>
+                {result.ok ? 'OK' : 'Failed'}
+              </span>
+              <span className="text-muted">provider: {result.provider.name} ({result.provider.type})</span>
+              {result.capability && (
+                <span className={CAPABILITY_BADGES[result.capability]}>{result.capability}</span>
+              )}
+              <span className="text-muted">latency: {result.latency}ms</span>
+              {result.resolvedModel !== result.model && (
+                <span className="text-muted">resolved: {result.resolvedModel}</span>
+              )}
+            </div>
+            {showDetail && (
+              <p className="text-xs text-gray-300 whitespace-pre-wrap break-words">{detail}</p>
+            )}
+          </div>
+        </div>
+      </div>
+    );
   }
 
   // Group models by provider
@@ -229,33 +287,42 @@ export default function ModelsPage() {
             placeholder="Test prompt"
           />
         </div>
-        {testResult && (
-          <div className={`border rounded px-3 py-2 ${testResult.ok ? 'bg-success/10 border-success/20' : 'bg-danger/10 border-danger/20'}`}>
-            <div className="flex items-start gap-2">
-              {testResult.ok
-                ? <CheckCircle2 size={14} className="text-success mt-0.5 flex-shrink-0" />
-                : <XCircle size={14} className="text-danger mt-0.5 flex-shrink-0" />}
-              <div className="min-w-0 flex-1 space-y-1">
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                  <span className={testResult.ok ? 'text-success font-medium' : 'text-danger font-medium'}>
-                    {testResult.ok ? 'OK' : 'Failed'}
-                  </span>
-	                  <span className="text-muted">provider: {testResult.provider.name} ({testResult.provider.type})</span>
-	                  {testResult.capability && (
-	                    <span className={CAPABILITY_BADGES[testResult.capability]}>{testResult.capability}</span>
-	                  )}
-	                  <span className="text-muted">latency: {testResult.latency}ms</span>
-                  {testResult.resolvedModel !== testResult.model && (
-                    <span className="text-muted">resolved: {testResult.resolvedModel}</span>
-                  )}
-                </div>
-                <p className="text-xs text-gray-300 whitespace-pre-wrap break-words">
-                  {testResult.ok ? testResult.content : testResult.error}
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
+      </div>
+
+      <div className="card space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-medium">Manual Model</h3>
+          <p className="text-xs text-muted">Add a model that provider fetch does not list</p>
+        </div>
+        <div className="grid grid-cols-12 gap-2">
+          <select className="input col-span-3" value={manualProvider} onChange={e => setManualProvider(e.target.value)}>
+            <option value="">Provider...</option>
+            {providers.filter(p => p.enabled).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <input
+            className="input col-span-4 font-mono"
+            placeholder="Upstream model id"
+            value={manualModel}
+            onChange={e => setManualModel(e.target.value)}
+          />
+          <input
+            className="input col-span-3 font-mono"
+            placeholder="Client alias (optional)"
+            value={manualAlias}
+            onChange={e => setManualAlias(e.target.value)}
+          />
+          <label className="col-span-1 flex items-center justify-center gap-1 text-xs text-muted">
+            <input type="checkbox" checked={manualFork} onChange={e => setManualFork(e.target.checked)} />
+            keep
+          </label>
+          <button
+            className="btn-primary col-span-1 px-2 flex items-center justify-center"
+            disabled={!manualProvider || !manualModel.trim()}
+            onClick={addManualModel}
+          >
+            <Plus size={14} />
+          </button>
+        </div>
       </div>
 
       {/* Available models */}
@@ -290,13 +357,15 @@ export default function ModelsPage() {
               <h4 className="text-xs font-medium text-accent">{providerName}</h4>
               <span className="text-xs text-muted">{pModels.length} model{pModels.length !== 1 ? 's' : ''}</span>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 items-start">
               {pModels.map(m => {
                 const key = aliasKey(m);
 	                const editing = aliasEditingKey === key;
 	                const existingAlias = findAlias(m);
 	                const upstream = upstreamModel(m);
 	                const capability = capabilityOf(m);
+                  const testKey = `${m.provider_id}:${m.id}`;
+                  const inlineResult = testResultsByKey[testKey];
 	                return (
                   <div key={`${m.provider_id}:${m.id}`} className="bg-base-700 rounded px-3 py-1.5 min-w-0 space-y-1">
                     <div className="flex items-center gap-2 min-w-0">
@@ -356,6 +425,7 @@ export default function ModelsPage() {
                     {editing && (
                       <p className="text-[11px] text-muted font-mono truncate">maps to {upstream}</p>
                     )}
+                    {inlineResult && renderTestResult(inlineResult)}
                   </div>
                 );
               })}

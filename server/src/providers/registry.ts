@@ -327,6 +327,7 @@ export type FetchModelsResult = {
 export async function fetchAllModels(): Promise<FetchModelsResult> {
   const providers = db.prepare('SELECT * FROM providers WHERE enabled = 1').all() as Provider[];
   const aliases = db.prepare('SELECT * FROM model_aliases').all() as ModelAlias[];
+  const providersById = new Map(providers.map(p => [p.id, p]));
   const aliasesByModel = new Map<string, ModelAlias[]>();
   for (const alias of aliases) {
     const key = `${alias.provider_id}:${alias.upstream_model}`;
@@ -337,6 +338,7 @@ export async function fetchAllModels(): Promise<FetchModelsResult> {
 
   const models: FetchModelsResult['models'] = [];
   const errors: FetchModelsResult['errors'] = [];
+  const fetchedUpstreams = new Set<string>();
 
   await Promise.allSettled(
     providers.map(async (p) => {
@@ -345,6 +347,7 @@ export async function fetchAllModels(): Promise<FetchModelsResult> {
         const adapter = getAdapter(config.type);
         const fetched = await adapter.listModels(config);
         for (const m of fetched) {
+          fetchedUpstreams.add(`${p.id}:${m.id}`);
           const matchingAliases = aliasesByModel.get(`${p.id}:${m.id}`) ?? [];
           const replacingAliases = matchingAliases.filter(a => !a.fork);
           const forkedAliases = matchingAliases.filter(a => !!a.fork);
@@ -389,6 +392,23 @@ export async function fetchAllModels(): Promise<FetchModelsResult> {
       }
     })
   );
+
+  for (const alias of aliases) {
+    if (fetchedUpstreams.has(`${alias.provider_id}:${alias.upstream_model}`)) continue;
+    const p = providersById.get(alias.provider_id);
+    if (!p) continue;
+    models.push({
+      id: alias.alias,
+      name: alias.alias,
+      owned_by: 'manual',
+      capability: classifyModelCapability(alias.alias),
+      source_id: alias.upstream_model,
+      alias_of: alias.alias === alias.upstream_model ? undefined : alias.upstream_model,
+      forked_alias: !!alias.fork,
+      provider_id: p.id,
+      provider_name: p.name,
+    });
+  }
 
   return { models, errors };
 }
