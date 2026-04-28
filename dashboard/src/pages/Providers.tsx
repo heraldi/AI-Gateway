@@ -224,7 +224,7 @@ export default function ProvidersPage() {
       setOauthMsg(started.userCode
         ? `Enter code ${started.userCode} in the opened ${label} page.`
         : `Waiting for ${label} authorization...`);
-      const deadline = Date.now() + 5 * 60_000;
+      const deadline = Date.now() + 1 * 60_000;
       while (Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 1500));
         const status = await api.oauth.status(oauthProvider, started.state);
@@ -273,7 +273,7 @@ export default function ProvidersPage() {
           ? `Enter code ${started.userCode} in the opened ${label} page.`
           : `Waiting for ${label} authorization...`,
       }));
-      const deadline = Date.now() + 5 * 60_000;
+      const deadline = Date.now() + 1 * 60_000;
       while (Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 1500));
         const status = await api.oauth.status(oauthProvider, started.state);
