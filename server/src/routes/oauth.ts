@@ -1543,6 +1543,51 @@ async function handleCodexCallback(req: Request, res: ExpressResponse): Promise<
 
 oauthPublicRouter.get('/codex/callback', (req, res) => { void handleCodexCallback(req, res); });
 
+oauthAdminRouter.post('/codex/manual-callback', (req, res) => {
+  void (async () => {
+    try {
+      const body = req.body as { callback_url?: string; code?: string; state?: string; target_provider_id?: string };
+      let code = body.code;
+      let state = body.state;
+
+      if (body.callback_url) {
+        const u = new URL(body.callback_url);
+        code = u.searchParams.get('code') ?? code;
+        state = u.searchParams.get('state') ?? state;
+      }
+
+      if (!code) { res.status(400).json({ error: 'code is required (or provide callback_url)' }); return; }
+      if (!state) { res.status(400).json({ error: 'state is required (or provide callback_url)' }); return; }
+
+      const session = oauthSessions.get(state);
+      if (!session || session.provider !== 'codex' || session.status !== 'pending') {
+        res.status(400).json({ error: 'OAuth state is invalid or expired. Start a new OAuth flow first.' });
+        return;
+      }
+      if (!session.codeVerifier) { res.status(400).json({ error: 'OAuth session is missing code verifier.' }); return; }
+
+      const redirectUri = session.redirectUri ?? 'http://localhost:1455/auth/callback';
+      const tokens = await exchangeCodexCode(code, redirectUri, session.codeVerifier);
+      const account = tokens.email ?? `codex-${String(tokens.refreshToken ?? tokens.accessToken).slice(0, 12)}`;
+      const providerId = upsertBearerProvider({
+        targetProviderId: body.target_provider_id ?? session.targetProviderId,
+        provider: 'codex',
+        type: 'codex',
+        baseUrl: 'https://chatgpt.com/backend-api/codex/responses',
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        email: account,
+        notes: `Connected via Codex OAuth (${account})`,
+        cookies: { id_token: tokens.idToken, expires_in: tokens.expiresIn },
+      });
+      oauthSessions.set(state, { status: 'complete', provider: 'codex', createdAt: session.createdAt, providerId, email: account });
+      res.json({ ok: true, providerId, email: account });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  })();
+});
+
 oauthAdminRouter.post('/codex/manual-token', (req, res) => {
   const { access_token, refresh_token, email, target_provider_id } = req.body as {
     access_token?: string;

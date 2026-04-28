@@ -232,5 +232,7 @@ export const api = {
     status: (provider: OAuthProvider, state: string) => get<OAuthStatusResult>(`/oauth/${provider}/status/${encodeURIComponent(state)}`),
     codexManualToken: (data: { access_token: string; refresh_token?: string; email?: string; target_provider_id?: string }) =>
       post<{ ok: boolean; providerId: string; email: string }>('/oauth/codex/manual-token', data),
+    codexManualCallback: (data: { callback_url?: string; code?: string; state?: string; target_provider_id?: string }) =>
+      post<{ ok: boolean; providerId: string; email: string }>('/oauth/codex/manual-callback', data),
   },
 };

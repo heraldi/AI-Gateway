@@ -116,7 +116,7 @@ export default function ProvidersPage() {
   const [accountOAuthPresetByProvider, setAccountOAuthPresetByProvider] = useState<Record<string, string>>({});
   const [accountOAuthMsg, setAccountOAuthMsg] = useState<Record<string, string>>({});
   const [accountOAuthLoading, setAccountOAuthLoading] = useState<Record<string, boolean>>({});
-  const [codexManualToken, setCodexManualToken] = useState('');
+  const [codexManualUrl, setCodexManualUrl] = useState('');
   const [codexManualMsg, setCodexManualMsg] = useState('');
   const [showCodexManual, setShowCodexManual] = useState(false);
 
@@ -183,14 +183,14 @@ export default function ProvidersPage() {
     );
   }
 
-  async function submitCodexManualToken() {
-    if (!codexManualToken.trim()) return;
+  async function submitCodexManualCallback() {
+    if (!codexManualUrl.trim()) return;
     setLoading(true);
-    setCodexManualMsg('Submitting token...');
+    setCodexManualMsg('Exchanging code...');
     try {
-      const result = await api.oauth.codexManualToken({ access_token: codexManualToken.trim() });
+      const result = await api.oauth.codexManualCallback({ callback_url: codexManualUrl.trim() });
       setCodexManualMsg(`Connected: ${result.email}`);
-      setCodexManualToken('');
+      setCodexManualUrl('');
       setShowCodexManual(false);
       setShowForm(false);
       setEditId(null);
@@ -636,24 +636,26 @@ export default function ProvidersPage() {
                 {showCodexManual && selectedPreset?.oauth === 'codex' && (
                   <div className="border border-border rounded p-3 space-y-2 mt-2">
                     <p className="text-xs text-warning">
-                      Port 1455 callback failed. Paste your Codex access token manually instead.
+                      Port 1455 callback failed. Paste the full callback URL from your browser instead.
                     </p>
                     <p className="text-xs text-muted">
-                      Get it from: <code className="bg-base-700 px-1 rounded">chatgpt.com</code> → DevTools → Application → Local Storage → <code className="bg-base-700 px-1 rounded">access_token</code>, or from your Codex CLI config at <code className="bg-base-700 px-1 rounded">~/.codex/auth.json</code>.
+                      Setelah login Codex, browser akan redirect ke URL seperti:<br />
+                      <code className="bg-base-700 px-1 rounded break-all">http://localhost:1455/auth/callback?code=...&state=...</code><br />
+                      Copy URL tersebut dari address bar lalu paste di bawah.
                     </p>
                     <input
                       className="input font-mono text-xs"
-                      type="password"
-                      placeholder="Paste access_token here..."
-                      value={codexManualToken}
-                      onChange={e => setCodexManualToken(e.target.value)}
+                      type="text"
+                      placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+                      value={codexManualUrl}
+                      onChange={e => setCodexManualUrl(e.target.value)}
                     />
                     <button
                       className="btn-primary w-full text-xs"
-                      disabled={loading || !codexManualToken.trim()}
-                      onClick={submitCodexManualToken}
+                      disabled={loading || !codexManualUrl.trim()}
+                      onClick={submitCodexManualCallback}
                     >
-                      {loading ? 'Saving...' : 'Save Token Manually'}
+                      {loading ? 'Connecting...' : 'Complete OAuth Manually'}
                     </button>
                     {codexManualMsg && (
                       <p className={`text-xs ${codexManualMsg.startsWith('Error') ? 'text-danger' : 'text-success'}`}>{codexManualMsg}</p>
