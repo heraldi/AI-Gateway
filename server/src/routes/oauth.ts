@@ -1543,6 +1543,36 @@ async function handleCodexCallback(req: Request, res: ExpressResponse): Promise<
 
 oauthPublicRouter.get('/codex/callback', (req, res) => { void handleCodexCallback(req, res); });
 
+oauthAdminRouter.post('/codex/manual-token', (req, res) => {
+  const { access_token, refresh_token, email, target_provider_id } = req.body as {
+    access_token?: string;
+    refresh_token?: string;
+    email?: string;
+    target_provider_id?: string;
+  };
+  if (!access_token || typeof access_token !== 'string') {
+    res.status(400).json({ error: 'access_token is required' });
+    return;
+  }
+  try {
+    const account = email ?? `codex-${access_token.slice(0, 12)}`;
+    const providerId = upsertBearerProvider({
+      targetProviderId: target_provider_id,
+      provider: 'codex',
+      type: 'codex',
+      baseUrl: 'https://chatgpt.com/backend-api/codex/responses',
+      accessToken: access_token,
+      refreshToken: refresh_token,
+      email: account,
+      notes: `Connected via Codex manual token (${account})`,
+      cookies: { expires_in: undefined },
+    });
+    res.json({ ok: true, providerId, email: account });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 async function handleGitlabCallback(req: Request, res: ExpressResponse): Promise<void> {
   const state = typeof req.query.state === 'string' ? req.query.state : '';
   const code = typeof req.query.code === 'string' ? req.query.code : '';

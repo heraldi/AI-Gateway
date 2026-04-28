@@ -116,6 +116,9 @@ export default function ProvidersPage() {
   const [accountOAuthPresetByProvider, setAccountOAuthPresetByProvider] = useState<Record<string, string>>({});
   const [accountOAuthMsg, setAccountOAuthMsg] = useState<Record<string, string>>({});
   const [accountOAuthLoading, setAccountOAuthLoading] = useState<Record<string, boolean>>({});
+  const [codexManualToken, setCodexManualToken] = useState('');
+  const [codexManualMsg, setCodexManualMsg] = useState('');
+  const [showCodexManual, setShowCodexManual] = useState(false);
 
   const load = () => api.providers.list().then(setProviders).catch(console.error);
   useEffect(() => { load(); }, []);
@@ -180,12 +183,35 @@ export default function ProvidersPage() {
     );
   }
 
+  async function submitCodexManualToken() {
+    if (!codexManualToken.trim()) return;
+    setLoading(true);
+    setCodexManualMsg('Submitting token...');
+    try {
+      const result = await api.oauth.codexManualToken({ access_token: codexManualToken.trim() });
+      setCodexManualMsg(`Connected: ${result.email}`);
+      setCodexManualToken('');
+      setShowCodexManual(false);
+      setShowForm(false);
+      setEditId(null);
+      setForm(emptyForm());
+      setSelectedPresetId('');
+      load();
+      setTimeout(() => setCodexManualMsg(''), 3000);
+    } catch (e) {
+      setCodexManualMsg(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function connectOAuth() {
     const oauthProvider = selectedPreset?.oauth;
     if (!oauthProvider) return;
     const label = oauthLabel(oauthProvider);
     setLoading(true);
     setOauthMsg(`Opening ${label} login...`);
+    setShowCodexManual(false);
     try {
       const started = await api.oauth.start(oauthProvider);
       const popup = window.open(started.authUrl, `ai-gateway-${oauthProvider}-oauth`, 'width=520,height=760');
@@ -215,9 +241,11 @@ export default function ProvidersPage() {
         }
         if (status.status === 'error') throw new Error(status.error);
       }
-      throw new Error('OAuth timeout.');
+      throw new Error('OAuth timeout — port 1455 may be blocked. Use the manual token option below.');
     } catch (e) {
-      setOauthMsg(`OAuth error: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      setOauthMsg(`OAuth error: ${msg}`);
+      if (oauthProvider === 'codex') setShowCodexManual(true);
       setLoading(false);
     }
   }
@@ -604,6 +632,33 @@ export default function ProvidersPage() {
                 </button>
                 {oauthMsg && (
                   <p className={`text-xs ${oauthMsg.startsWith('OAuth error') ? 'text-danger' : 'text-muted'}`}>{oauthMsg}</p>
+                )}
+                {showCodexManual && selectedPreset?.oauth === 'codex' && (
+                  <div className="border border-border rounded p-3 space-y-2 mt-2">
+                    <p className="text-xs text-warning">
+                      Port 1455 callback failed. Paste your Codex access token manually instead.
+                    </p>
+                    <p className="text-xs text-muted">
+                      Get it from: <code className="bg-base-700 px-1 rounded">chatgpt.com</code> → DevTools → Application → Local Storage → <code className="bg-base-700 px-1 rounded">access_token</code>, or from your Codex CLI config at <code className="bg-base-700 px-1 rounded">~/.codex/auth.json</code>.
+                    </p>
+                    <input
+                      className="input font-mono text-xs"
+                      type="password"
+                      placeholder="Paste access_token here..."
+                      value={codexManualToken}
+                      onChange={e => setCodexManualToken(e.target.value)}
+                    />
+                    <button
+                      className="btn-primary w-full text-xs"
+                      disabled={loading || !codexManualToken.trim()}
+                      onClick={submitCodexManualToken}
+                    >
+                      {loading ? 'Saving...' : 'Save Token Manually'}
+                    </button>
+                    {codexManualMsg && (
+                      <p className={`text-xs ${codexManualMsg.startsWith('Error') ? 'text-danger' : 'text-success'}`}>{codexManualMsg}</p>
+                    )}
+                  </div>
                 )}
               </div>
             )}

@@ -230,5 +230,7 @@ export const api = {
     start: (provider: OAuthProvider, targetProviderId?: string) =>
       post<OAuthStartResult>(`/oauth/${provider}/start`, targetProviderId ? { target_provider_id: targetProviderId } : {}),
     status: (provider: OAuthProvider, state: string) => get<OAuthStatusResult>(`/oauth/${provider}/status/${encodeURIComponent(state)}`),
+    codexManualToken: (data: { access_token: string; refresh_token?: string; email?: string; target_provider_id?: string }) =>
+      post<{ ok: boolean; providerId: string; email: string }>('/oauth/codex/manual-token', data),
   },
 };
